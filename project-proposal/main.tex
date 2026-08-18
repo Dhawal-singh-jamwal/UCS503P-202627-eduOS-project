@@ -1,242 +1,492 @@
-\documentclass[11pt,a4paper]{article}
+\documentclass[12pt,a4paper]{article}
+
 \usepackage[margin=1in]{geometry}
-\usepackage{hyperref}
 \usepackage{enumitem}
-\usepackage{graphicx}
-\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{setspace}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{booktabs}
+\usepackage{array}
 
-% -----------------------------------------------------
-% bvraghav-tiet-ucs503p-article.sty
-% -----------------------------------------------------
+\setstretch{1.15}
 
-% Variable: Lab Instructor
-\makeatletter \newcommand{\BvrSetLabInstructor}[1]{%
-  \gdef\Bvr@LabInstructor{#1}}
-% default
-\newcommand{\Bvr@LabInstructor}{Dr. Raghav %
-  B. Venkataramaiyer}
-% public accessor
-\newcommand{\BvrLabInstructorValue}{\Bvr@LabInstructor}
-\makeatother
+\titleformat{\section}
+{\normalfont\Large\bfseries}
+{\thesection}
+{0.5em}
+{}
 
-% Add subtitle
-\usepackage{titling}
-% -- Set title bold
-\pretitle{\begin{center}\bfseries\fontsize{18bp}{18bp}\selectfont}
-\makeatletter
-\newcommand{\BvrSubtitle}[1]{%
-  \posttitle{%
-    \par\end{center}
-    \begin{center}\large#1\end{center}
-    \vskip 0.5em}%
-}
-\makeatother
-
-% Hints in the section title(s)
-\newcommand{\BvrHint}[1]{%
-  {\normalfont\normalsize\itshape\hfill #1}}
-
-% -----------------------------------------------------
-
-\title{Grievance-Resolution System for a Tier-2/3 City}
-
-\BvrSetLabInstructor{Dr. Raghav B. Venkataramaiyer}
-
-\BvrSubtitle{%
-  Project Proposal for UCS503P  \\
-  Submitted to: \BvrLabInstructorValue \\ \bfseries
-  Thapar Institute of Engineering and Technology% 
-}
-
-\author{
-  Vidya Vaidyanathan, CSED%
-  \thanks{Roll No: \texttt{1024030xxx}, %
-    Email: \texttt{vvaidhanathan\_be24\@thapar.edu}}
-  \and 
-  Bhanurekha Ganesan, CSED%
-  \thanks{Roll No: \texttt{1024030xxx}, %
-    Email: \texttt{bganesan\_be24\@thapar.edu}}
-}
-
-\date{\today}
+\titleformat{\subsection}
+{\normalfont\large\bfseries}
+{\thesubsection}
+{0.5em}
+{}
 
 \begin{document}
-\maketitle
 
-\section{Higher-order goal%
-  \BvrHint{\ldots secondary framing}}
-This project aims to improve sustainable urban
-governance by reducing the time and effort required to
-resolve citizen issues. While the topic is broader than
-any single municipality, the immediate engineering
-objective is to translate \emph{efficient public
-  service delivery} into a measurable, deployable
-software solution.
+\begin{center}
 
-\section{Time-to-value %
-\BvrHint{\ldots primary heuristic}}
-\begin{itemize}[leftmargin=0.7cm]
-    \item We will deliver meaningful increments quickly by prototyping the core user workflow and validating it with users within a short iteration window.
-    \item We will prioritize fast feedback over perfection by using weekly iterations (and targeting CI-backed automation early) to reduce release friction.
-    \item Success is defined by what can be delivered and measured in the first iteration, then improved based on user feedback.
+{\LARGE \textbf{EduOS: A Linux-Based Academic Computing Platform}}\\[0.8em]
+
+{\large Project Proposal for UCS503P}\\[1em]
+
+Submitted to: \textbf{Dr. Raghav B. Venkataramaiyer}\\
+Thapar Institute of Engineering and Technology\\[1em]
+
+\begin{tabular}{ccc}
+\textbf{Dhawal Singh Jamwal} & \textbf{Aaditya Kumar Yadav} & \textbf{Harshit} \\
+Roll No: 1024170276 & Roll No: 1024170275 & Roll No: 1024170283 \\
+CSED & CSED & CSED \\
+\end{tabular}
+
+August 18, 2026
+
+\end{center}
+
+\section{Introduction}
+
+Modern academic laboratories rely heavily on software. Programming courses require different compilers and development environments, database courses require database systems and clients, networking courses require specialized tools, and operating-system courses often require access to low-level system utilities.
+
+Although the underlying hardware in a laboratory may be identical, the software environment can vary significantly between machines. Installing packages manually, correcting broken configurations, maintaining dependencies, and restoring machines after misuse can consume a considerable amount of administrative time.
+
+EduOS proposes an alternative approach: instead of treating laboratory computers as independent general-purpose machines, they are treated as managed instances of a common academic computing environment.
+
+EduOS will be developed as a Gentoo-based Linux distribution with an accompanying management and assessment ecosystem. The project will combine a customized operating system, declarative laboratory profiles, centralized machine management, an academic software hub, and automated laboratory evaluation.
+
+\section{Vision of EduOS}
+
+The central idea behind EduOS is simple:
+
+\begin{center}
+\textit{The institution defines the computing environment; EduOS makes every machine conform to it.}
+\end{center}
+
+Rather than manually configuring each laboratory computer, an administrator should be able to describe the requirements of a laboratory through a profile.
+
+For example, a C++ programming laboratory may require:
+
+\begin{itemize}
+    \item GCC and Clang.
+    \item CMake.
+    \item GDB.
+    \item Git.
+    \item Required libraries.
+    \item Course-specific tools.
 \end{itemize}
 
-\section{Problem Statement}
-Citizens in a tier-2/3 Indian city face delays and uncertainty when reporting local issues (e.g., streetlight outages, water leakage, garbage accumulation, road potholes). Common pain points include:
-\begin{itemize}[leftmargin=0.7cm]
-    \item \textbf{Fragmentation:} complaints are often made via multiple channels (calls, social media, paper forms), causing lost context.
-    \item \textbf{Low transparency:} citizens cannot easily see the status of their complaint (e.g., ``received'', ``assigned'', ``in progress'', ``resolved'').
-    \item \textbf{Slow coordination:} departments/field teams lack a unified, trackable workflow with clear ownership.
-    \item \textbf{Poor data quality:} duplicate or incomplete reports force rework and extend resolution time.
-\end{itemize}
+A networking laboratory may instead require packet-analysis tools, network utilities, simulation software, and specific system configurations.
 
-\textbf{Why this matters now (contextual relevance):} In an urban setting with limited staff bandwidth, even small process improvements can noticeably reduce resolution delays and repeated submissions.
+EduOS will use these profiles to determine what software and configuration a machine should have. The system will then continuously work toward that desired state.
 
-\section{Proposed Solution %
-\BvrHint{\ldots Software Proposition}}
-\subsection{Overview}
-Build a \textbf{web-based} ``Grievance-to-Resolution'' system with the following components:
-\begin{itemize}[leftmargin=0.7cm]
-    \item \textbf{Citizen submission portal:} users submit an issue with photo (optional), category, and locality/ward.
-    \item \textbf{Automated triage:} basic duplicate detection and completeness checks.
-    \item \textbf{Department workflow:} assign issues to relevant department/team and update statuses.
-    \item \textbf{Status transparency:} citizens track status and receive notifications when resolved.
-    \item \textbf{Admin/ops dashboard:} performance summaries (resolution time, backlog).
-\end{itemize}
+This transforms laboratory administration from a collection of manual installation procedures into a reproducible configuration-management problem.
 
-\subsection{Core workflow}
-\begin{enumerate}[leftmargin=0.7cm]
-    \item Citizen creates a complaint and receives a complaint ID immediately.
-    \item System validates completeness and suggests possible duplicates (lightweight similarity on text/category and approximate location).
-    \item Department staff update status (Received $\rightarrow$ Assigned $\rightarrow$ In Progress $\rightarrow$ Resolved).
-    \item Citizen views status updates and resolution notes.
+\section{Problem Being Addressed}
+
+A university laboratory generally has three separate concerns:
+
+\begin{enumerate}
+    \item Providing students with the correct computing environment.
+    \item Maintaining that environment across many machines.
+    \item Evaluating the work produced inside that environment.
 \end{enumerate}
 
-\subsection{Operational constraints for an educational, tier-2/3 setting}
-\begin{itemize}[leftmargin=0.7cm]
-    \item Keep the solution usable on low-to-mid range devices via responsive web design.
-    \item Avoid dependence on advanced research algorithms; focus on workflow, automation, and system correctness.
-    \item Design for deployability using common web hosting and managed databases.
+These concerns are normally handled by different tools and manual processes.
+
+Students may encounter problems such as:
+
+\begin{itemize}
+    \item A required package is missing.
+    \item A compiler or interpreter version differs from the expected version.
+    \item Dependencies have been installed incorrectly.
+    \item A laboratory machine has been modified by another user.
+    \item The student's local environment behaves differently from the instructor's environment.
 \end{itemize}
 
-\section{Solution Approach %
-\BvrHint{\ldots Engineering focus}}
-This is an engineering course project, so we focus on scalable administrative and workflow aspects rather than novel algorithm research.
+Instructors face a different problem. Even after providing the environment, laboratory submissions may still need to be manually compiled, executed, tested, and checked.
 
-\subsection{Duplicate/quality assistance %
-\BvrHint{\ldots non-research}}
-Duplicate detection will be heuristic-based:
-\begin{itemize}[leftmargin=0.7cm]
-    \item Normalize text (category + short description keywords).
-    \item Use a simple similarity measure (e.g., token overlap / TF-IDF cosine with threshold) without claiming state-of-the-art.
-    \item Show top candidate duplicates to staff for decision; never fully auto-delete or auto-reject.
+EduOS attempts to address both sides of this problem by combining environment management and laboratory evaluation into one platform.
+
+\section{Proposed System}
+
+EduOS will consist of several interconnected components rather than being limited to a customized Linux ISO.
+
+\subsection{EduOS Operating System}
+
+The operating-system layer will be based on Gentoo Linux.
+
+Gentoo is particularly suitable for this project because its package and profile system allows the project to define a highly customized environment instead of starting with a fixed collection of packages.
+
+The EduOS image will contain the common software required by students and administrators, while course-specific software can be introduced through laboratory profiles.
+
+The operating system will also be designed with the academic use case in mind. Unnecessary services can be removed, while development tools, documentation, utilities, and educational resources can be provided as part of the platform.
+
+\subsection{Laboratory Profiles}
+
+A laboratory profile will describe the desired state of a particular academic environment.
+
+A profile may contain:
+
+\begin{itemize}
+    \item Operating-system packages.
+    \item Compiler and interpreter requirements.
+    \item Development libraries.
+    \item System services.
+    \item Configuration files.
+    \item Environment variables.
+    \item Course-specific applications.
+    \item Policies or restrictions.
 \end{itemize}
 
-\subsection{Web architecture %
-\BvrHint{\ldots web-based solution}}
-A typical 3-tier web architecture:
-\begin{itemize}[leftmargin=0.7cm]
-    \item \textbf{Frontend:} responsive UI for citizens and staff (status pages, submission form, dashboard).
-    \item \textbf{Backend API:} authentication, complaint submission, status transitions, assignment logic.
-    \item \textbf{Database:} store users, complaints, status history, attachments metadata.
+Profiles will be represented using structured configuration files and stored under version control.
+
+This provides an important property for the project: an entire laboratory environment can be recreated from a known configuration instead of relying on undocumented manual setup steps.
+
+\subsection{EduOS Management Server}
+
+The management server will act as the central control point for the system.
+
+Administrators will be able to:
+
+\begin{itemize}
+    \item Register machines.
+    \item Assign machines to laboratories.
+    \item Create and modify laboratory profiles.
+    \item Monitor machine status.
+    \item View synchronization information.
+    \item Manage available academic software.
 \end{itemize}
 
-\subsection{CI/CD and fast delivery enabler}
-CI/CD will be used to:
-\begin{itemize}[leftmargin=0.7cm]
-    \item Automatically build and run tests on every change.
-    \item Produce repeatable deployment artifacts to staging.
-    \item Enable safe and frequent releases of incremental features.
-\end{itemize}
+The server will expose an API through which managed machines communicate with the central system.
 
-\section{Evaluation Criterion %
-\BvrHint{\ldots measurable and attributable}}
-We define success using measurable metrics tied to the core workflow.
+\subsection{EduOS Agent}
 
-\subsection{Primary evaluation metric}
-\textbf{Time-to-acknowledgement (TTA):} time between complaint submission and ``Received/Assigned'' status creation in the system.
-\begin{itemize}[leftmargin=0.7cm]
-    \item Target: median TTA $\le$ 2 hours during pilot window.
-    \item Attribution: measured from database timestamps (submission vs. first status update by staff).
-\end{itemize}
+Each managed machine will run a lightweight EduOS agent.
 
-\subsection{Secondary evaluation metrics}
-\begin{itemize}[leftmargin=0.7cm]
-    \item \textbf{Resolution time reduction:} reduce time-to-resolved compared to baseline process (even if baseline is collected via survey).
-    \item \textbf{Duplicate rate:} percentage of complaints flagged as duplicates and resolved without rework.
-    \item \textbf{User clarity:} citizen-reported clarity of status using a simple 1--5 feedback question.
-    \item \textbf{Reliability:} availability of staging/production for login and submission during business hours (e.g., $\ge$ 99\% uptime in pilot).
-\end{itemize}
+The agent will periodically communicate with the management server and determine whether the local system matches the assigned laboratory profile.
 
-\subsection{Pilot validation plan %
-\BvrHint{\ldots high-level}}
-\begin{itemize}[leftmargin=0.7cm]
-    \item Recruit 10--20 pilot users (citizens) and 3--5 staff roles (department simulation if real staff unavailable).
-    \item Compare metrics before/after within the iteration window by logging baseline estimates via short interviews or existing process observations.
-\end{itemize}
+A simplified model is:
 
-\section{Scalability %
-\BvrHint{\ldots with foresight}}
-The proposition should scale in both theoretical and practical senses.
+\begin{center}
+\textbf{Desired State}
+$\rightarrow$
+\textbf{Agent}
+$\rightarrow$
+\textbf{Local System}
+\end{center}
 
-\begin{enumerate}[leftmargin=0.7cm]
-    \item \textbf{Scalable (theoretically):} The system should support growth in number of complaints and concurrent dashboard usage by:
-    \begin{itemize}[leftmargin=0.7cm]
-        \item decoupling components (frontend/backend),
-        \item enabling pagination and indexing for common queries,
-        \item using stateless API design.
-    \end{itemize}
-    
-    \item \textbf{Operationally deployable (practically):} The system should run on common web hosting:
-    \begin{itemize}[leftmargin=0.7cm]
-        \item managed database,
-        \item containerized or platform-hosted deployment,
-        \item CI/CD pipeline for staging/production.
-    \end{itemize}
+If a required package is missing, the agent can initiate the appropriate package-management operation. If a configuration has changed, the system can restore the expected configuration.
+
+This approach also provides a mechanism for detecting configuration drift.
+
+\section{EduLab: Academic Assessment Layer}
+
+A major part of EduOS is the integration of laboratory assessment.
+
+EduLab will provide a common interface through which students can receive laboratory tasks, submit their work, and view evaluation results.
+
+Instead of creating a separate evaluation system for every subject, EduLab will use a common submission format and connect submissions to specialized evaluators.
+
+The proposed architecture is:
+
+\begin{center}
+\textbf{Student}
+$\rightarrow$
+\textbf{EduLab}
+$\rightarrow$
+\textbf{Evaluator}
+$\rightarrow$
+\textbf{Result}
+\end{center}
+
+\subsection{Programming Evaluation}
+
+For programming laboratories, a submission may contain source code and supporting files.
+
+The evaluator will:
+
+\begin{enumerate}
+    \item Create an isolated execution environment.
+    \item Compile the student's program.
+    \item Execute predefined test cases.
+    \item Apply resource limits.
+    \item Collect program output and execution information.
+    \item Compare the result with the expected output.
+    \item Generate a score and evaluation report.
 \end{enumerate}
 
-\section{Engine availability heuristic}
-A mature set of ``engines'' (tooling/services) is available to implement this as a web-based project:
-\begin{itemize}[leftmargin=0.7cm]
-    \item Web framework for REST APIs and templated/reactive pages.
-    \item Managed relational or document database.
-    \item Authentication approach (token-based or session-based).
-    \item Object storage for optional attachments (or local storage for pilot).
-    \item Test framework for unit/integration tests.
-    \item CI runner and staging deployment target.
-\end{itemize}
-We will use these mature components to focus on workflow design, correctness, and measurement rather than inventing new infrastructure.
+This allows a C/C++ laboratory, for example, to be evaluated automatically without requiring the instructor to manually compile every submission.
 
-\section{Project scope and deliverables %
-\BvrHint{\ldots iteration-friendly}}
-\subsection{Initial deliverable %
-\BvrHint{\ldots first iteration}}
-\begin{itemize}[leftmargin=0.7cm]
-    \item Citizen submission form + complaint ID generation
-    \item Staff workflow: update status and assignment
-    \item Citizen status page: view timeline/history
-    \item Basic logging and timestamps for TTA measurement
-    \item CI: build + backend unit tests + linting
-    \item CD to staging with a single command or pipeline job
+\subsection{Multiple Laboratory Domains}
+
+The evaluator system will be modular.
+
+The first implementation can focus on programming laboratories, while the architecture will allow future evaluators for:
+
+\begin{itemize}
+    \item C/C++ programming.
+    \item SQL and database exercises.
+    \item Linux administration.
+    \item Computer networking.
+    \item Shell scripting.
+    \item Other command-line based laboratory exercises.
 \end{itemize}
 
-\subsection{Subsequent deliverables}
-\begin{itemize}[leftmargin=0.7cm]
-    \item Lightweight duplicate suggestions with staff review
-    \item Notification layer (email/SMS optional in later iteration; can start with in-app notifications)
-    \item Admin dashboard for metrics and backlog
-    \item Improved search/filtering and indexed queries for scale readiness
+This makes EduLab a general laboratory framework rather than a single-purpose programming judge.
+
+\section{System Architecture}
+
+The proposed EduOS architecture can be divided into four major layers.
+
+\begin{center}
+\begin{tabular}{|p{0.25\textwidth}|p{0.60\textwidth}|}
+\hline
+\textbf{Layer} & \textbf{Purpose} \\
+\hline
+EduOS Client & Operating system, local tools, machine agent and student environment \\
+\hline
+Management Layer & Authentication, machine registration, profiles and desired-state management \\
+\hline
+EduLab Layer & Laboratory tasks, submissions, evaluation and result generation \\
+\hline
+Infrastructure Layer & Database, containers, virtualization and deployment infrastructure \\
+\hline
+\end{tabular}
+\end{center}
+
+The expected communication model is:
+
+\begin{center}
+
+\textbf{EduOS Machines}
+$\leftrightarrow$
+\textbf{Management API}
+$\leftrightarrow$
+\textbf{Database}
+
+\bigskip
+
+\textbf{Students}
+$\rightarrow$
+\textbf{EduLab}
+$\rightarrow$
+\textbf{Evaluation Workers}
+
+\end{center}
+
+The separation between these components will allow the project to evolve without requiring the entire system to be redesigned whenever a new laboratory or evaluator is introduced.
+
+\section{Technology Stack}
+
+The project will make use of existing technologies wherever they provide reliable infrastructure.
+
+\begin{itemize}
+    \item \textbf{Gentoo Linux:} Base operating system.
+    \item \textbf{Portage:} Package management and dependency handling.
+    \item \textbf{Gentoo Profiles and Overlays:} Customization of academic environments.
+    \item \textbf{Catalyst:} Automated generation of EduOS system images.
+    \item \textbf{Python:} Backend services and system tooling.
+    \item \textbf{FastAPI:} Management and EduLab APIs.
+    \item \textbf{PostgreSQL:} Persistent application data.
+    \item \textbf{React and TypeScript:} Web interfaces.
+    \item \textbf{Ansible:} Configuration and machine-management support.
+    \item \textbf{Podman:} Isolation of evaluation workloads.
+    \item \textbf{QEMU/KVM:} Virtual testing of operating-system images.
+    \item \textbf{Git:} Version control for software and laboratory configurations.
+    \item \textbf{YAML/Pydantic:} Structured and validated laboratory specifications.
 \end{itemize}
 
-\section{Risks and mitigations}
-\begin{itemize}[leftmargin=0.7cm]
-    \item \textbf{Data privacy / consent:} minimize collected data; keep attachments optional; store only what is needed.
-    \item \textbf{Staff adoption:} provide an easy UI for status updates; keep workflow steps minimal; include shortcuts.
-    \item \textbf{Evaluation measurement ambiguity:} instrument timestamps and define clear status transitions before development begins.
-    \item \textbf{Operational issues in pilot:} use staging early; ensure CI/CD produces repeatable deployments.
+The use of these components allows the project to concentrate on integrating them into an academic platform instead of implementing basic infrastructure from scratch.
+
+\section{Security Considerations}
+
+Security is particularly important because EduLab will execute student-created programs.
+
+A student's program should not receive unrestricted access to the machine running the evaluator.
+
+Therefore, submitted programs will be executed inside isolated containers with restrictions on:
+
+\begin{itemize}
+    \item CPU usage.
+    \item Memory usage.
+    \item Execution time.
+    \item Filesystem access.
+    \item Network access.
+    \item Available system capabilities.
 \end{itemize}
 
-\section{Summary}
-This project proposes a deployable web platform to reduce grievance handling delays in a tier-2/3 city context. It meets the course criteria by emphasizing time-to-value through rapid iterations, implementing CI/CD to support frequent safe releases, and using measurable evaluation criteria (especially time-to-acknowledgement). It remains focused on engineering workflow and scalability readiness rather than research-driven novelty.
+The evaluator will communicate only the information required to produce the result.
+
+The management system will also use authentication and role separation so that administrative operations are not exposed to ordinary student accounts.
+
+\section{Reproducibility and Version Control}
+
+One of the main advantages of the proposed system is that an academic environment becomes an explicitly defined artifact.
+
+A laboratory profile can be stored alongside the source code of the project and assigned a version.
+
+For example:
+
+\begin{center}
+\texttt{CSE-LAB-CPP-v1}
+$\rightarrow$
+Compiler + Libraries + Tools + Configuration
+\end{center}
+
+If a laboratory configuration changes, the change can be recorded as a new version.
+
+This provides a historical record of the environment under which a laboratory was conducted and makes it possible to recreate previous environments when required.
+
+\section{Development Methodology}
+
+The project will be developed incrementally.
+
+\subsection{Phase 1: EduOS Base}
+
+\begin{itemize}
+    \item Build the initial Gentoo-based EduOS image.
+    \item Configure the base academic environment.
+    \item Create the initial package/profile structure.
+    \item Test the image using QEMU/KVM.
+\end{itemize}
+
+\subsection{Phase 2: Machine Management}
+
+\begin{itemize}
+    \item Implement machine registration.
+    \item Develop the EduOS agent.
+    \item Create laboratory profile definitions.
+    \item Implement desired-state synchronization.
+\end{itemize}
+
+\subsection{Phase 3: EduLab}
+
+\begin{itemize}
+    \item Develop student submission functionality.
+    \item Implement the first programming evaluator.
+    \item Introduce containerized execution.
+    \item Generate evaluation results.
+\end{itemize}
+
+\subsection{Phase 4: Integration}
+
+The final phase will connect the operating-system, management, and assessment components and evaluate the complete workflow.
+
+\section{Evaluation Plan}
+
+The project will not be evaluated only on whether the software runs. The evaluation will measure whether EduOS actually improves the management and assessment workflow.
+
+The following experiments will be performed.
+
+\subsection{Environment Deployment}
+
+A clean machine or virtual machine will be configured using the EduOS workflow.
+
+The time and number of manual steps required will be compared against a conventional manual setup process.
+
+\subsection{Configuration Drift}
+
+A managed machine will be deliberately modified by installing or removing software.
+
+The system will then be observed to determine whether the machine detects and corrects the deviation from its assigned profile.
+
+\subsection{Reproducibility Test}
+
+The same laboratory profile will be used to generate multiple environments.
+
+The resulting environments will be compared to determine whether the required software and configurations remain consistent.
+
+\subsection{Automated Evaluation}
+
+A collection of known-correct, known-incorrect, compilation-failing, and resource-intensive submissions will be passed through EduLab.
+
+The evaluator will be measured for:
+
+\begin{itemize}
+    \item Correctness of grading.
+    \item Execution time.
+    \item Failure detection.
+    \item Resource isolation.
+\end{itemize}
+
+\section{Expected Outcomes}
+
+At the end of the project, the expected result is a functional proof of concept demonstrating that EduOS can serve as a common academic computing platform.
+
+The system should demonstrate:
+
+\begin{itemize}
+    \item A reproducible Gentoo-based academic operating system.
+    \item Central management of laboratory configurations.
+    \item Automatic synchronization of managed machines.
+    \item A common academic software environment.
+    \item A functional laboratory submission platform.
+    \item Automated and isolated evaluation of programming assignments.
+    \item Version-controlled laboratory environments.
+    \item A modular architecture that can support additional laboratory domains.
+\end{itemize}
+
+The project is intentionally scoped as a proof of concept. The objective is not to immediately replace an institution's existing infrastructure, but to demonstrate that operating-system management and academic assessment can be integrated into a single platform.
+
+\section{Potential Extensions}
+
+If the initial system proves successful, several capabilities could be added in future iterations.
+
+\begin{itemize}
+    \item A complete graphical software center for academic applications.
+    \item Automatic machine health monitoring.
+    \item Remote recovery or re-imaging of laboratory systems.
+    \item Course-specific desktop environments.
+    \item Instructor-created laboratory templates.
+    \item Automatic generation of laboratory environments from course specifications.
+    \item More advanced networking and systems laboratories using virtual machines.
+    \item Integration with existing university authentication systems.
+    \item Student performance analytics.
+    \item Centralized update scheduling for laboratory machines.
+\end{itemize}
+
+\section{Risks and Challenges}
+
+\subsection{Complexity of Building a Custom Distribution}
+
+Maintaining a customized Gentoo environment introduces additional work compared with using a conventional distribution.
+
+This will be addressed by keeping the initial package set limited and maintaining the configuration through version-controlled profiles and automated builds.
+
+\subsection{Hardware Compatibility}
+
+A Linux distribution intended for laboratory machines must support the available hardware.
+
+Virtual machines will be used extensively during development, followed by testing on representative physical hardware.
+
+\subsection{Maintaining Consistency}
+
+Machines may be modified locally by users or affected by package changes.
+
+The management agent and desired-state model will provide a mechanism for detecting and correcting such deviations.
+
+\subsection{Security of Automated Evaluation}
+
+Running arbitrary student programs presents a security risk.
+
+Container isolation, resource restrictions, and controlled evaluator environments will therefore be part of the design rather than being added as an afterthought.
+
+\subsection{Project Scope}
+
+EduOS combines operating-system development, configuration management, backend development, web development, and automated evaluation.
+
+To keep the project achievable, the initial implementation will focus on one complete end-to-end workflow instead of attempting to support every possible academic laboratory.
+
+\section{Conclusion}
+
+EduOS proposes a different way of approaching university computer laboratories. Instead of viewing a laboratory computer as an independently configured PC, EduOS treats it as a managed component of an institution-wide academic computing environment.
+
+The project combines a Gentoo-based operating system with laboratory profiles, centralized configuration management, an academic software environment, and EduLab, a platform for automated laboratory assessment.
+
+The most important property of the system is reproducibility. A laboratory environment should be definable, versionable, deployable, and recoverable without depending on a long sequence of undocumented manual configuration steps.
+
+By combining operating-system customization with centralized management and automated evaluation, EduOS aims to demonstrate a practical platform that can reduce laboratory administration overhead while giving students a more consistent development environment and giving instructors a more systematic method of evaluating technical coursework.
+
+The semester project will focus on implementing and validating this core concept through a working proof of concept rather than attempting to deliver a complete production-ready university operating system.
 
 \end{document}
