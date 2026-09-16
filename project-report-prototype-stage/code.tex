@@ -1,0 +1,685 @@
+\documentclass{tietreport}
+
+% ==================================================
+% PACKAGES
+% ==================================================
+
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{array}
+\usepackage{booktabs}
+
+% Prevent blank pages between chapters
+\let\cleardoublepage\clearpage
+\usepackage{titlesec}
+
+% Reduce vertical spacing around headings
+\titlespacing*{\chapter}
+{0pt}      % left
+{-20pt}    % space before
+{20pt}     % space after
+
+\titlespacing*{\section}
+{0pt}
+{14pt}
+{6pt}
+
+\titlespacing*{\subsection}
+{0pt}
+{10pt}
+{4pt}
+% ==================================================
+% PROJECT INFORMATION
+% ==================================================
+
+\TitlePageHeader{%
+  UCS503P - Software Engineering Project%
+}
+
+\ProjectTitle{%
+  EduOS: A Linux-Based Academic Computing Platform%
+}
+
+\ProjectSubTitle{%
+  Prototype Report%
+}
+
+\author{%
+  \texttt{1024170276} Dhawal Singh Jamwal \\
+  \texttt{1024170275} Aaditya Kumar Yadav \\
+  \texttt{1024170283} Harshit%
+}
+
+\TitlePageSubText{%
+  BE Computer Science and Engineering%
+}
+
+\AdvisorName{%
+  Dr. Nisha Thakur%
+}
+
+\TitlePageFooterText{{%
+    \large Prototype Evaluation \\[0.2cm]
+    \bfseries Computer Science and Engineering Department%
+  } \\[0.15cm]
+  Thapar Institute of Engineering and Technology,
+  Patiala%
+}
+
+% ==================================================
+% HELPER COMMAND FOR DIAGRAMS
+% ==================================================
+%
+% Usage:
+%
+% \diagramfigure
+%   {images/usecase.png}
+%   {Use Case Diagram}
+%   {fig:usecase}
+%
+% If the image does not exist yet, LaTeX will show
+% a placeholder instead of failing to compile.
+%
+
+\newcommand{\diagramfigure}[3]{%
+\begin{figure}[H]
+    \centering
+    \makebox[\textwidth][c]{%
+        \includegraphics[
+            width=1.12\textwidth,
+            height=0.78\textheight,
+            keepaspectratio
+        ]{#1}
+    }
+    \caption{#2}
+    \label{#3}
+\end{figure}
+}
+
+% ==================================================
+% DOCUMENT
+% ==================================================
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+
+% ==================================================
+% CHAPTER 1
+% ==================================================
+
+\chapter{Introduction}
+
+\section{Background and Context}
+
+Modern university computer laboratories depend on a large
+collection of software tools including compilers, development
+environments, database systems, networking utilities, operating
+system tools, and course-specific applications.
+
+Although laboratory computers may use similar hardware, their
+software environments frequently become inconsistent. Packages
+may be missing, configuration files may be modified, software
+versions may differ between machines, and previous users may
+leave the system in an unexpected state.
+
+These inconsistencies create difficulties for both students and
+laboratory administrators. Students may encounter situations in
+which a program works on one machine but fails on another due to
+differences in installed software or configuration. Administrators
+must repeatedly install packages, correct configurations, and
+restore machines to the expected state.
+
+EduOS proposes a Linux-based academic computing platform in which
+laboratory computers are treated as managed instances of a common
+academic environment rather than independent general-purpose
+systems.
+
+The long-term vision of EduOS is to combine operating-system
+customization, centralized configuration management, academic
+software distribution, and automated laboratory assessment into
+one integrated platform.
+
+The present prototype focuses on establishing the basic
+student-facing operating-system environment and demonstrating
+multiple independent student identities within the operating
+system.
+
+\subsection{Problem Statement}
+
+Traditional university laboratory environments are generally
+configured and maintained on a machine-by-machine basis. This
+approach introduces several problems:
+
+\begin{itemize}
+
+    \item Required development tools may be missing from some
+    laboratory machines.
+
+    \item Compiler, interpreter, library, or application versions
+    may differ between systems.
+
+    \item Students may unintentionally modify a machine and affect
+    subsequent users.
+
+    \item Students and instructors may execute programs in different
+    software environments.
+
+    \item Laboratory administrators must repeatedly perform manual
+    installation and recovery procedures.
+
+    \item Student laboratory work is often evaluated separately from
+    the environment in which it was produced.
+
+\end{itemize}
+
+EduOS addresses these problems by proposing a reproducible and
+centrally manageable Linux environment designed specifically for
+academic laboratories.
+
+The current prototype demonstrates the first layer of this system:
+multiple authenticated student operating-system accounts and a
+personalized academic interface that automatically identifies the
+logged-in student.
+
+\section{Project Objectives}
+
+The major objectives of EduOS are:
+
+\begin{enumerate}
+
+    \item \textbf{Develop an academic Linux environment:}
+    Create a customized Arch Linux based operating-system image
+    containing the tools and services required for academic
+    laboratory usage.
+
+    \item \textbf{Provide separate student identities:}
+    Support multiple student accounts with independent Linux user
+    sessions, home directories, and authentication.
+
+    \item \textbf{Provide a personalized student environment:}
+    Automatically identify the currently authenticated student and
+    display student-specific information and academic tasks.
+
+    \item \textbf{Support reproducible laboratory environments:}
+    Define software and configuration requirements in a structured
+    form so that similar laboratory systems can be reproduced.
+
+    \item \textbf{Enable centralized machine management:}
+    Develop a management architecture through which machines can
+    eventually receive laboratory profiles and desired-state
+    configuration.
+
+    \item \textbf{Support automated laboratory assessment:}
+    Extend the platform to allow students to submit laboratory work
+    that can be executed and evaluated within controlled isolated
+    environments.
+
+\end{enumerate}
+
+
+% ==================================================
+% CHAPTER 2
+% ==================================================
+
+\chapter{Methodology and Design}
+
+\section{System Architecture}
+
+EduOS is designed as a layered academic computing platform rather
+than only as a customized Linux distribution.
+
+The proposed system consists of four primary layers:
+
+\begin{enumerate}
+
+    \item \textbf{EduOS Client Layer}
+
+    The operating system installed on laboratory computers. It
+    provides the student desktop environment, development tools,
+    student identity, and the local EduOS software interface.
+
+    \item \textbf{Management Layer}
+
+    Responsible for authentication, machine registration,
+    laboratory profiles, user management, and desired-state
+    configuration.
+
+    \item \textbf{EduLab Layer}
+
+    Responsible for laboratory tasks, student submissions,
+    evaluation requests, and result generation.
+
+    \item \textbf{Infrastructure Layer}
+
+    Provides persistent storage, containerized execution,
+    virtualization, and system deployment infrastructure.
+
+\end{enumerate}
+
+The complete architecture is intended to support the following
+high-level communication flows:
+
+\begin{center}
+\textbf{EduOS Client $\leftrightarrow$ Management System
+$\leftrightarrow$ Data Storage}
+\end{center}
+
+and
+
+\begin{center}
+\textbf{Student $\rightarrow$ Task and Submission Service
+$\rightarrow$ Evaluation Worker
+$\rightarrow$ Result}
+\end{center}
+
+
+% --------------------------------------------------
+% 2.1.1
+% --------------------------------------------------
+
+\subsection{High-Level Design}
+
+The EduOS architecture separates the user-facing operating system
+from management and evaluation services.
+
+A student first authenticates using an operating-system account.
+Each student receives a separate Linux identity and home directory.
+
+After authentication, the XFCE desktop session is started. A
+student-specific EduOS interface is automatically launched. The
+application determines the current operating-system user and maps
+the account to academic information such as roll number, student
+name, and assigned tasks.
+
+For the current proof of concept, this information is stored
+locally using structured JSON data.
+
+The future architecture replaces this local data source with the
+EduOS Management System and centralized database.
+
+The planned workflow is therefore:
+
+\begin{center}
+
+Student Authentication
+
+$\downarrow$
+
+EduOS Client
+
+$\downarrow$
+
+EduOS Management System
+
+$\downarrow$
+
+Task and Submission Service
+
+$\downarrow$
+
+Evaluation Worker
+
+$\downarrow$
+
+Isolated Evaluation Environment
+
+$\downarrow$
+
+Results Management
+
+\end{center}
+
+This separation allows each subsystem to evolve independently. For
+example, additional laboratory evaluators can be introduced
+without redesigning the EduOS client operating system.
+
+
+% --------------------------------------------------
+% 2.1.2
+% --------------------------------------------------
+
+\subsection{Technical Stack}
+
+The following technologies are used or planned for EduOS:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.27\textwidth} p{0.63\textwidth}}
+\toprule
+\textbf{Technology} & \textbf{Purpose} \\
+\midrule
+
+Arch Linux &
+Base operating system used for the current EduOS prototype. \\
+
+ArchISO &
+Creation of bootable and reproducible EduOS ISO images. \\
+
+XFCE &
+Lightweight desktop environment used by EduOS clients. \\
+
+SDDM &
+Graphical display manager and Linux user authentication interface. \\
+
+Python &
+Implementation of the current EduOS student application and future
+system services. \\
+
+Tkinter &
+Graphical interface used by the current student portal prototype. \\
+
+JSON &
+Temporary structured storage for student-specific academic
+information and tasks. \\
+
+systemd &
+Startup service management and EduOS initialization. \\
+
+QEMU/KVM &
+Virtualized testing of generated EduOS operating-system images. \\
+
+Git &
+Version control for operating-system configuration and project
+source code. \\
+
+FastAPI &
+Planned API framework for the EduOS management and assessment
+services. \\
+
+PostgreSQL &
+Planned persistent storage for centralized users, machines,
+profiles, tasks, submissions, and results. \\
+
+Podman &
+Planned isolation environment for automated execution and
+evaluation of student programs. \\
+
+\bottomrule
+\end{tabular}
+
+\caption{EduOS Technology Stack}
+\label{tab:technology-stack}
+\end{table}
+
+
+% ==================================================
+% 2.2
+% ==================================================
+
+\section{Implementation Details}
+
+\subsection{Module 1: Arch Linux ISO Setup}
+
+The first module focuses on creating the base EduOS operating system environment using Arch Linux and ArchISO.
+
+The purpose of this module is to produce a bootable custom Linux image that contains the graphical environment and system components required by EduOS.
+
+The current prototype uses Arch Linux as the base distribution because ArchISO provides a convenient way to define packages, configuration files, services, and system behavior inside a reproducible bootable image.
+
+The ArchISO profile is maintained under:
+
+\begin{verbatim}
+code/archiso/profile
+\end{verbatim}
+
+The main components included in the current image are:
+
+\begin{itemize}
+    \item Arch Linux base system
+    \item XFCE desktop environment
+    \item SDDM display manager
+    \item Xorg graphical session
+    \item Mesa graphics support
+    \item Python runtime
+    \item Tkinter for the EduOS student application
+    \item systemd for boot-time service management
+    \item Network and basic administration utilities
+\end{itemize}
+
+The ISO is generated using the \texttt{mkarchiso} utility. The build process takes the EduOS ArchISO profile and generates a bootable ISO image that can be tested inside a virtual machine.
+
+The prototype is currently tested using QEMU/KVM. This provides an isolated environment in which the complete operating system can be booted and tested without modifying the host computer.
+
+The overall workflow of this module is:
+
+\begin{center}
+ArchISO Profile \\[2mm]
+$\downarrow$ \\[2mm]
+Package and Configuration Integration \\[2mm]
+$\downarrow$ \\[2mm]
+ISO Generation using mkarchiso \\[2mm]
+$\downarrow$ \\[2mm]
+Boot and Testing using QEMU/KVM
+\end{center}
+
+One major issue encountered during implementation was the graphical session startup. Although user authentication was successful, the XFCE session initially failed because SDDM attempted to launch the XFCE Wayland session.
+
+The problem was solved by configuring SDDM to explicitly use X11. The relevant configuration was placed under:
+
+\begin{verbatim}
+/etc/sddm.conf.d/10-eduos-x11.conf
+\end{verbatim}
+
+The resulting configuration ensures that EduOS boots into a stable SDDM and XFCE X11 environment.
+
+At the current stage, this module provides the foundation on which the remaining EduOS features are executed.
+
+\subsection{Module 2: User Base and Student Environment Setup}
+
+The second module focuses on creating and managing multiple student users inside EduOS and providing each student with an independent and personalized academic environment.
+
+Instead of representing students only as records inside the graphical application, the prototype creates actual Linux user accounts.
+
+The following student accounts are currently included in the prototype:
+
+\begin{itemize}
+    \item \texttt{student1000}
+    \item \texttt{student1001}
+    \item \texttt{student1002}
+    \item \texttt{student1003}
+    \item \texttt{student1004}
+\end{itemize}
+
+A separate administrative account named \texttt{eduos} is also retained for system maintenance and debugging.
+
+Each student account has:
+
+\begin{itemize}
+    \item A separate Linux username
+    \item A unique user identity
+    \item An independent home directory
+    \item A separate login session
+    \item A configured password
+    \item An associated student roll number
+    \item Student-specific academic data
+\end{itemize}
+
+The user accounts are provisioned automatically using the EduOS setup script:
+
+\begin{verbatim}
+/usr/local/bin/eduos-setup
+\end{verbatim}
+
+This script is executed through a systemd service during system startup.
+
+The service ensures that all required student accounts are created before the SDDM graphical login screen becomes available.
+
+The provisioning mechanism is designed to be idempotent, meaning that running the setup process multiple times maintains the required system state without repeatedly creating duplicate accounts.
+
+After authentication, each student receives a separate XFCE session.
+
+The EduOS student application is implemented using Python and Tkinter and is located at:
+
+\begin{verbatim}
+/usr/local/bin/eduos-student-app
+\end{verbatim}
+
+The application automatically identifies the currently authenticated Linux user instead of asking the student to perform a second login.
+
+The identified username is used to load the corresponding student information from:
+
+\begin{verbatim}
+/usr/share/eduos/student-data.json
+\end{verbatim}
+
+The student interface currently displays:
+
+\begin{itemize}
+    \item Student name
+    \item Roll number
+    \item Linux username
+    \item Assigned academic tasks
+    \item Task status
+    \item Due information
+\end{itemize}
+
+Different users are assigned different sample tasks so that the prototype can demonstrate student-specific personalization.
+
+The student application is configured to launch automatically after login and opens in fullscreen mode.
+
+The current user workflow is:
+
+\begin{center}
+EduOS Boot \\[2mm]
+$\downarrow$ \\[2mm]
+SDDM Authentication \\[2mm]
+$\downarrow$ \\[2mm]
+Student Linux Session \\[2mm]
+$\downarrow$ \\[2mm]
+Automatic EduOS Application Startup \\[2mm]
+$\downarrow$ \\[2mm]
+Student-Specific Academic Information
+\end{center}
+
+The administrative \texttt{eduos} account does not enter the student interface automatically and instead receives access to the normal XFCE desktop. This allows the administrator to inspect users, files, system services, and configuration.
+
+At the current prototype stage, student academic information is stored locally using JSON. In the future, this local data source can be replaced with the centralized EduOS management API and database without changing the fundamental Linux authentication workflow.
+
+% ==================================================
+% 2.3 DIAGRAMS
+% ==================================================
+
+\section{System Diagrams}
+
+The following diagrams describe the functional, behavioural,
+interaction, and data-flow views of the proposed EduOS system.
+
+
+% --------------------------------------------------
+% USE CASE
+% --------------------------------------------------
+
+\subsection{Use Case Diagram}
+
+The use case diagram represents the interactions between the
+primary EduOS actors and the major services provided by the
+system.
+
+\diagramfigure
+{images/use-case-diagram.png}
+{EduOS Use Case Diagram}
+{fig:use-case}
+
+
+% --------------------------------------------------
+% ACTIVITY / SWIMLANE
+% --------------------------------------------------
+
+\subsection{Activity Diagram}
+
+The activity diagram represents the workflow of the EduOS system
+using swimlanes to separate the responsibilities of the student
+and the major EduOS subsystems.
+
+\diagramfigure
+{images/activity-diagram.png}
+{EduOS Activity Diagram}
+{fig:activity}
+
+
+% --------------------------------------------------
+% DATA FLOW
+% --------------------------------------------------
+
+\subsection{Data Flow Diagrams}
+
+The data flow diagrams represent how information moves between
+students, administrators, EduOS processes, evaluation components,
+and persistent data stores.
+
+\subsubsection{Level 0 Data Flow Diagram}
+
+\diagramfigure
+{images/dfd-level-0.png}
+{EduOS Level 0 Data Flow Diagram}
+{fig:dfd0}
+
+\subsubsection{Level 1 Data Flow Diagram}
+
+\diagramfigure
+{images/dfd-level-1.png}
+{EduOS Level 1 Data Flow Diagram}
+{fig:dfd1}
+
+\subsubsection{Level 2 Data Flow Diagram}
+
+\diagramfigure
+{images/dfd-level-2.png}
+{EduOS Level 2 Data Flow Diagram}
+{fig:dfd2}
+
+
+% --------------------------------------------------
+% SEQUENCE
+% --------------------------------------------------
+
+\subsection{Sequence Diagram}
+
+The sequence diagram illustrates the time-ordered interaction
+between the student, EduOS client, management system, submission
+service, database, evaluator, and results system.
+
+\diagramfigure
+{images/sequence-diagram.png}
+{EduOS Sequence Diagram}
+{fig:sequence}
+
+
+% --------------------------------------------------
+% COLLABORATION
+% --------------------------------------------------
+
+\subsection{Collaboration Diagram}
+
+The collaboration diagram presents the structural interaction
+between the major EduOS components and the messages exchanged
+between them.
+
+\diagramfigure
+{images/collaboration-diagram.png}
+{EduOS Collaboration Diagram}
+{fig:collaboration}
+
+
+% --------------------------------------------------
+% GANTT
+% --------------------------------------------------
+
+\subsection{Gantt Chart}
+
+The Gantt chart represents the planned project schedule and the
+development sequence of the major EduOS modules.
+
+\diagramfigure
+{images/gantt-chart.png}
+{EduOS Project Gantt Chart}
+{fig:gantt}
+
+
+% ==================================================
+% STOP REPORT HERE
+% ==================================================
+
+\end{document}
