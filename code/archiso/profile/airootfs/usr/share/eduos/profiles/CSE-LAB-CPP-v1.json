@@ -1,0 +1,16 @@
+{
+  "profile_id": "CSE-LAB-CPP-v1",
+  "name": "C++ Programming Laboratory",
+  "version": 1,
+  "required_packages": [
+    "gcc",
+    "gdb",
+    "git",
+    "pv"
+  ],
+  "required_services": [],
+  "environment": {
+    "cpp_standard": "c++17"
+  },
+  "managed_files": []
+}

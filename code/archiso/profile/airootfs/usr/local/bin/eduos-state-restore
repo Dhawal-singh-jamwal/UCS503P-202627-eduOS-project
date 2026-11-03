@@ -1,0 +1,14 @@
+#!/usr/bin/python3 -I
+"""Boot-only restoration, not exposed through the sudo helper request protocol."""
+import os
+import runpy
+import sys
+
+if os.getuid() != 0 or os.geteuid() != 0 or len(sys.argv) != 1:
+    raise SystemExit('Root boot restoration only.')
+try:
+    helper = runpy.run_path('/usr/local/bin/eduos-admin-helper', run_name='eduos_boot_helper')
+    helper['restore_state']()
+except Exception:
+    # Never print exception contents that could include password hashes.
+    raise SystemExit('EduOS persistent restoration failed. State was retained; inspect disk/identity conflicts before login.')

@@ -1,0 +1,17 @@
+#!/bin/bash
+set -euo pipefail
+state=/var/lib/eduos
+device=/dev/disk/by-label/EDUOS_STATE
+mkdir -p "$state"
+if mountpoint -q "$state"; then exit 0; fi
+# Allow udev to finish discovering the explicitly labeled virtio disk.
+udevadm settle --timeout=15 || true
+if [[ ! -b "$device" ]]; then
+    echo 'WARNING: EDUOS_STATE disk absent. EduOS data is EPHEMERAL and will be lost on reboot.' >&2
+    exit 0
+fi
+if ! mount -t ext4 -o nodev,nosuid,noexec "$device" "$state"; then
+    echo 'ERROR: EDUOS_STATE exists but cannot be mounted. Refusing to initialize over a failed state disk.' >&2
+    exit 1
+fi
+chmod 0755 "$state"

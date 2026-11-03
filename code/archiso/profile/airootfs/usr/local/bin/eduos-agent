@@ -1,0 +1,35 @@
+#!/usr/bin/python3 -I
+"""Small local EduOS machine agent. JSON output; no network management API."""
+
+import json
+import sys
+
+sys.path.insert(0, '/usr/share/eduos')
+import eduos_machine as machine
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] not in {'machine-info', 'status', 'check', 'sync', 'register'}:
+        print('Usage: eduos-agent {machine-info|status|check|sync|register}', file=sys.stderr)
+        return 2
+    try:
+        command = sys.argv[1]
+        if command == 'machine-info':
+            result = machine.load_machine()
+        elif command == 'status':
+            result = machine.cached_status()
+        elif command == 'check':
+            result = machine.check(save=False)
+        elif command == 'sync':
+            result = machine.sync()
+        else:
+            result = machine.register()
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result is None or result.get('compliant', True) else 1
+    except (machine.MachineError, OSError) as error:
+        print(f'EduOS agent: {error}', file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

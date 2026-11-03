@@ -8,7 +8,6 @@ bcachefs-tools
 bind
 bolt
 brltty
-broadcom-wl
 btrfs-progs
 clonezilla
 cloud-init
@@ -130,6 +129,13 @@ xl2tpd
 zsh
 xfce4
 xfce4-goodies
-lightdm
-lightdm-gtk-greeter
+xorg-server
+xorg-xinit
+sddm
+mesa
 network-manager-applet
+python
+tk
+gcc
+gdb
+git

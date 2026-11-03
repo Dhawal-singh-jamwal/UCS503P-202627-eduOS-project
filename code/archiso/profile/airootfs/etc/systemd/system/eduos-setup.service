@@ -1,0 +1,15 @@
+[Unit]
+Description=Create EduOS user
+Before=display-manager.service
+Requires=eduos-state.service
+After=local-fs.target systemd-sysusers.service eduos-state.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/eduos-setup
+StandardOutput=journal+console
+StandardError=journal+console
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

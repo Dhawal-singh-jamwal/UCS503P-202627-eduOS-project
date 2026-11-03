@@ -1,0 +1,915 @@
+#!/usr/bin/python3 -I
+"""EduOS administrator desktop application (no privileged GUI code)."""
+
+import copy
+import json
+import os
+from pathlib import Path
+import pwd
+import queue
+import re
+import subprocess
+import threading
+import sys
+import tkinter as tk
+from tkinter import messagebox, ttk
+from tkinter.scrolledtext import ScrolledText
+
+sys.path.insert(0, '/usr/share/eduos')
+import eduos_assignments as labs
+import eduos_submissions as submissions
+
+
+HELPER = '/usr/local/bin/eduos-admin-helper'
+USERNAME = re.compile(r'student[0-9]{4}', re.ASCII)
+BACKGROUND = '#111827'
+CARD = '#1f2937'
+FOREGROUND = '#f9fafb'
+BUILD_INFO = Path('/usr/share/eduos/build-info.txt')
+
+
+def build_label():
+    try:
+        return BUILD_INFO.read_text(encoding='utf-8').strip() or 'unknown'
+    except OSError:
+        return 'unknown'
+
+
+def is_administrator():
+    try:
+        return os.getuid() == os.geteuid() and pwd.getpwuid(os.getuid()).pw_name == 'eduos'
+    except KeyError:
+        return False
+
+
+def helper_request(request):
+    result = subprocess.run(['/usr/bin/sudo', '-n', '--', HELPER],
+                            input=json.dumps(request, ensure_ascii=False),
+                            capture_output=True, text=True, check=False)
+    try:
+        response = json.loads(result.stdout)
+    except (ValueError, UnicodeError):
+        raise RuntimeError('The administrator helper is unavailable. Check its installation and sudoers rule.')
+    if not isinstance(response, dict) or not response.get('ok'):
+        raise RuntimeError(response.get('error', 'Administrator operation failed.')
+                           if isinstance(response, dict) else 'Invalid helper response.')
+    return response
+
+
+class Editor(tk.Toplevel):
+    def __init__(self, parent, title, fields):
+        super().__init__(parent)
+        self.title(title)
+        self.transient(parent)
+        self.resizable(False, False)
+        self.configure(bg=BACKGROUND)
+        self.result = None
+        self.fields = fields
+        self.variables = {}
+        box = ttk.Frame(self, padding=20)
+        box.pack(fill='both', expand=True)
+        first = None
+        for index, (key, label, value, secret) in enumerate(fields):
+            ttk.Label(box, text=label).grid(row=index, column=0, sticky='w', pady=6, padx=(0, 15))
+            variable = tk.StringVar(value=value)
+            entry = ttk.Entry(box, textvariable=variable, width=42, show='*' if secret else '')
+            entry.grid(row=index, column=1, pady=6)
+            self.variables[key] = variable
+            if first is None:
+                first = entry
+        controls = ttk.Frame(box)
+        controls.grid(row=len(fields), column=0, columnspan=2, sticky='e', pady=(15, 0))
+        ttk.Button(controls, text='Cancel', command=self.cancel).pack(side='left', padx=5)
+        ttk.Button(controls, text='Apply', command=self.apply).pack(side='left')
+        self.protocol('WM_DELETE_WINDOW', self.cancel)
+        self.bind('<Escape>', lambda _event: self.cancel())
+        self.bind('<Return>', lambda _event: self.apply())
+        self.grab_set()
+        if first:
+            first.focus_set()
+        self.wait_window()
+
+    def clear_secrets(self):
+        for key, _label, _value, secret in self.fields:
+            if secret:
+                self.variables[key].set('')
+
+    def cancel(self):
+        self.clear_secrets()
+        self.destroy()
+
+    def apply(self):
+        values = {key: variable.get() for key, variable in self.variables.items()}
+        if any(not value.strip() for key, value in values.items() if key != 'due'):
+            messagebox.showerror(self.title(), 'Complete all required fields.', parent=self)
+            return
+        if 'username' in values and USERNAME.fullmatch(values['username']) is None:
+            messagebox.showerror(self.title(), 'Use student followed by exactly four ASCII digits.', parent=self)
+            return
+        if 'password' in values:
+            password = values['password']
+            if values.pop('confirm_password') != password:
+                messagebox.showerror(self.title(), 'Passwords do not match.', parent=self)
+                return
+            if len(password) > 1024 or ':' in password or any(ord(c) < 32 or ord(c) == 127 for c in password):
+                messagebox.showerror(self.title(), 'Password must be at most 1024 characters without colons or control characters.', parent=self)
+                return
+        self.result = values
+        self.clear_secrets()
+        self.destroy()
+
+
+class ProblemEditor(tk.Toplevel):
+    def __init__(self, parent, problem):
+        super().__init__(parent)
+        self.title('Problem ' + problem['id'])
+        self.transient(parent)
+        self.geometry('800x650')
+        self.result = None
+        self.ident = problem['id']
+        box = ttk.Frame(self, padding=16)
+        box.pack(fill='both', expand=True)
+        self.title_value = tk.StringVar(value=problem.get('title', ''))
+        self.language = tk.StringVar(value=problem.get('language', 'C++'))
+        ttk.Label(box, text='Problem Title').pack(anchor='w')
+        ttk.Entry(box, textvariable=self.title_value).pack(fill='x')
+        ttk.Label(box, text='Language').pack(anchor='w')
+        # Existing non-C++ problems remain editable; new evaluator work is C++ only.
+        choices = ['C++'] if self.language.get() == 'C++' else [self.language.get(), 'C++']
+        ttk.Combobox(box, textvariable=self.language, values=choices, state='readonly').pack(anchor='w')
+        self.status = tk.StringVar(value=problem.get('status', 'Assigned'))
+        ttk.Label(box, text='Status').pack(anchor='w')
+        ttk.Entry(box, textvariable=self.status).pack(fill='x')
+        self.evaluator = tk.BooleanVar(value=labs.evaluator_enabled(problem) or 'title' not in problem)
+        ttk.Checkbutton(box, text='Enable EduOS Evaluator (C++, exactly two tests)', variable=self.evaluator).pack(anchor='w', pady=8)
+        controls = ttk.Frame(box)
+        controls.pack(side='bottom', fill='x', pady=8)
+        ttk.Button(controls, text='Save Problem', command=self.apply).pack(side='right')
+        ttk.Button(controls, text='Cancel', command=self.destroy).pack(side='right')
+        tabs = ttk.Notebook(box)
+        tabs.pack(fill='both', expand=True)
+        statement_tab = ttk.Frame(tabs)
+        tabs.add(statement_tab, text='Problem Statement')
+        self.statement = ScrolledText(statement_tab, wrap='word', undo=True)
+        self.statement.pack(fill='both', expand=True)
+        self.statement.insert('1.0', problem.get('problem_statement', ''))
+        self.test_widgets = []
+        cases = problem.get('test_cases', [{'input': '', 'expected_output': ''}] * 2)
+        for index, case in enumerate(cases, 1):
+            page = ttk.Frame(tabs, padding=8)
+            tabs.add(page, text=f'Test Case {index}')
+            widgets = {}
+            for key, label in [('input', 'Input'), ('expected_output', 'Expected Output')]:
+                ttk.Label(page, text=label).pack(anchor='w')
+                widget = ScrolledText(page, height=5, wrap='none', font=('DejaVu Sans Mono', 11), undo=True)
+                widget.pack(fill='both', expand=True)
+                widget.insert('1.0', case[key])
+                widgets[key] = widget
+            self.test_widgets.append(widgets)
+        self.grab_set()
+        self.wait_window()
+
+    def apply(self):
+        item = {'id': self.ident, 'title': self.title_value.get(), 'language': self.language.get(),
+                'problem_statement': self.statement.get('1.0', 'end-1c'), 'status': self.status.get()}
+        if self.evaluator.get():
+            item['test_cases'] = [{key: widget.get('1.0', 'end-1c') for key, widget in case.items()}
+                                  for case in self.test_widgets]
+        try:
+            labs.validate_problem(item)
+        except ValueError as error:
+            messagebox.showerror('Problem', str(error), parent=self)
+            return
+        self.result = item
+        self.destroy()
+
+
+class AssignmentEditor(tk.Toplevel):
+    def __init__(self, parent, students, assignment=None):
+        super().__init__(parent)
+        self.title('Edit Lab Assignment' if assignment else 'Create Lab Assignment')
+        self.transient(parent)
+        self.geometry('850x650')
+        self.result = None
+        item = assignment or {}
+        self.problems = copy.deepcopy(item.get('problems', []))
+        self.next_problem = item.get('next_problem_id', 1)
+        outer = ttk.Frame(self, padding=16)
+        outer.pack(fill='both', expand=True)
+        controls = ttk.Frame(outer)
+        controls.pack(side='bottom', fill='x', pady=8)
+        ttk.Button(controls, text='Save Lab Assignment', command=self.apply).pack(side='right')
+        ttk.Button(controls, text='Cancel', command=self.destroy).pack(side='right')
+        tabs = ttk.Notebook(outer)
+        tabs.pack(fill='both', expand=True)
+        details, selection, questions = (ttk.Frame(tabs, padding=12) for _ in range(3))
+        for frame, label in [(details, '1. Assignment Details'), (selection, '2. Assign Students'), (questions, '3. Problems')]:
+            tabs.add(frame, text=label)
+        self.values = {}
+        for key, label in [('title', 'Title'), ('due', 'Due information (optional)')]:
+            ttk.Label(details, text=label).pack(anchor='w')
+            value = tk.StringVar(value=item.get(key, ''))
+            ttk.Entry(details, textvariable=value).pack(fill='x', pady=8)
+            self.values[key] = value
+        ttk.Label(details, text='Description').pack(anchor='w')
+        self.description = ScrolledText(details, wrap='word')
+        self.description.pack(fill='both', expand=True)
+        self.description.insert('1.0', item.get('description', ''))
+        choose = ttk.Frame(selection)
+        choose.pack(side='bottom', fill='x')
+        self.names = sorted(students)
+        self.students = tk.Listbox(selection, selectmode='multiple', exportselection=False)
+        self.students.pack(side='left', fill='both', expand=True)
+        bar = ttk.Scrollbar(selection, command=self.students.yview)
+        bar.pack(side='right', fill='y')
+        self.students.configure(yscrollcommand=bar.set)
+        for index, name in enumerate(self.names):
+            self.students.insert('end', f'{name} - Roll {students[name]}')
+            if name in item.get('assigned_to', []):
+                self.students.selection_set(index)
+        ttk.Button(choose, text='Select All', command=lambda: self.students.selection_set(0, 'end')).pack(side='left')
+        ttk.Button(choose, text='Clear All', command=lambda: self.students.selection_clear(0, 'end')).pack(side='left')
+        controls = ttk.Frame(questions)
+        controls.pack(side='bottom', fill='x')
+        for label, command in [('Add Problem', self.add), ('Edit Problem', self.edit), ('Delete Problem', self.delete)]:
+            ttk.Button(controls, text=label, command=command).pack(side='left', padx=4)
+        self.list = tk.Listbox(questions, exportselection=False)
+        self.list.pack(fill='both', expand=True)
+        self.redraw()
+        self.grab_set()
+        self.wait_window()
+
+    def redraw(self):
+        self.list.delete(0, 'end')
+        for problem in self.problems:
+            self.list.insert('end', f"{problem['id']} — {problem['title']}")
+
+    def add(self):
+        editor = ProblemEditor(self, {'id': f'Q{self.next_problem}'})
+        self.grab_set()
+        if editor.result:
+            self.problems.append(editor.result)
+            self.next_problem += 1
+            self.redraw()
+
+    def edit(self):
+        selection = self.list.curselection()
+        if selection:
+            editor = ProblemEditor(self, self.problems[selection[0]])
+            self.grab_set()
+            if editor.result:
+                self.problems[selection[0]] = editor.result
+                self.redraw()
+
+    def delete(self):
+        selection = self.list.curselection()
+        if selection and messagebox.askyesno('Delete Problem', 'Remove this problem? Stored submissions will be retained.', parent=self):
+            del self.problems[selection[0]]
+            self.redraw()
+
+    def apply(self):
+        values = {key: variable.get() for key, variable in self.values.items()}
+        values.update(description=self.description.get('1.0', 'end-1c'), problems=self.problems,
+                      assigned_to=[self.names[i] for i in self.students.curselection()])
+        try:
+            labs.validate_fields(values)
+        except ValueError as error:
+            messagebox.showerror('Lab Assignment', str(error), parent=self)
+            return
+        self.result = values
+        self.destroy()
+
+
+class AssignmentPanel:
+    def __init__(self, dashboard, parent):
+        self.dashboard = dashboard
+        self.revision = None
+        self.records = {}
+        self.students = {}
+        controls = ttk.Frame(parent)
+        controls.pack(side='bottom', fill='x')
+        for label, command in [('Create Lab Assignment', self.create), ('Edit Assignment', self.edit),
+                               ('Delete Assignment', self.delete), ('Refresh', self.refresh)]:
+            dashboard.button(controls, label, command).pack(side='left', padx=4)
+        panes = ttk.Panedwindow(parent, orient='horizontal')
+        panes.pack(fill='both', expand=True, pady=12)
+        left, right = ttk.Frame(panes), ttk.Frame(panes, padding=12)
+        panes.add(left, weight=1)
+        panes.add(right, weight=3)
+        self.list = ttk.Treeview(left, show='tree', selectmode='browse')
+        self.list.pack(side='left', fill='both', expand=True)
+        bar = ttk.Scrollbar(left, command=self.list.yview)
+        bar.pack(side='right', fill='y')
+        self.list.configure(yscrollcommand=bar.set)
+        self.list.bind('<<TreeviewSelect>>', self.show)
+        actions = ttk.Frame(right)
+        actions.pack(side='bottom', fill='x')
+        for label, action in [('Add Problem', 'add'), ('Edit Problem', 'edit'), ('Delete Problem', 'delete')]:
+            dashboard.button(actions, label, lambda operation=action: self.problem_action(operation)).pack(side='left')
+        self.detail = ScrolledText(right, wrap='word', state='disabled', height=7)
+        self.detail.pack(fill='both', expand=True)
+        self.questions = ttk.Treeview(right, show='tree', selectmode='browse', height=5)
+        self.questions.pack(fill='both', expand=True)
+
+    def refresh(self):
+        self.dashboard.request({'action': 'assignment_status'}, self.loaded)
+
+    def loaded(self, response):
+        selected = self.list.selection()
+        self.revision = response['revision']
+        self.students = response['students']
+        self.records = {a['id']: a for a in response['store']['assignments']}
+        self.list.delete(*self.list.get_children())
+        for ident, item in self.records.items():
+            self.list.insert('', 'end', iid=ident, text=f"{ident} — {item['title']}")
+        if selected and selected[0] in self.records:
+            self.list.selection_set(selected[0])
+        self.show()
+        self.dashboard.status.set(f'{len(self.records)} lab assignments loaded.')
+
+    def selected(self):
+        selection = self.list.selection()
+        return self.records.get(selection[0]) if selection else None
+
+    def show(self, _event=None):
+        item = self.selected()
+        content = 'Select a lab assignment.'
+        self.questions.delete(*self.questions.get_children())
+        if item:
+            content = (f"{item['id']}\n{item['title']}\n\n{item['description']}\n\n"
+                       f"Due: {item['due'] or 'Not specified'}\nAssigned students:\n" + '\n'.join(item['assigned_to']))
+            for problem in item['problems']:
+                self.questions.insert('', 'end', iid=problem['id'], text=f"{problem['id']} — {problem['title']}")
+        self.detail.configure(state='normal')
+        self.detail.delete('1.0', 'end')
+        self.detail.insert('1.0', content)
+        self.detail.configure(state='disabled')
+
+    def create(self):
+        self.edit(create=True)
+
+    def edit(self, create=False):
+        if self.dashboard.busy:
+            return
+        if self.revision is None:
+            self.refresh()
+            return
+        item = None if create else self.selected()
+        if not create and item is None:
+            return
+        editor = AssignmentEditor(self.dashboard.root, self.students, item)
+        if editor.result:
+            self.send(editor.result, item)
+
+    def send(self, values, item):
+        payload = {'action': 'update_assignment' if item else 'create_assignment',
+                   'revision': self.revision, 'assignment': values}
+        if item:
+            payload['id'] = item['id']
+        self.dashboard.request(payload, self.saved)
+
+    def problem_action(self, action):
+        item = self.selected()
+        if not item or self.dashboard.busy:
+            return
+        values = {key: copy.deepcopy(item[key]) for key in labs.FIELDS}
+        selected = self.questions.selection()
+        if action == 'add':
+            editor = ProblemEditor(self.dashboard.root, {'id': f"Q{item['next_problem_id']}"})
+            if not editor.result:
+                return
+            values['problems'].append(editor.result)
+        else:
+            if not selected:
+                return
+            index = next(i for i, p in enumerate(values['problems']) if p['id'] == selected[0])
+            if action == 'edit':
+                editor = ProblemEditor(self.dashboard.root, values['problems'][index])
+                if not editor.result:
+                    return
+                values['problems'][index] = editor.result
+            else:
+                if len(values['problems']) == 1:
+                    messagebox.showerror('Problem', 'A lab must retain at least one problem.', parent=self.dashboard.root)
+                    return
+                if not messagebox.askyesno('Delete Problem', 'Remove this problem? Submissions will be retained.', parent=self.dashboard.root):
+                    return
+                del values['problems'][index]
+        self.send(values, item)
+
+    def delete(self):
+        item = self.selected()
+        if self.dashboard.busy or not item:
+            return
+        if messagebox.askyesno('Delete Assignment', f"Delete {item['id']}? Student submissions will be retained.", parent=self.dashboard.root):
+            self.dashboard.request({'action': 'delete_assignment', 'revision': self.revision, 'id': item['id']}, self.saved)
+
+    def saved(self, response):
+        self.revision = response['revision']
+        if response.get('warning'):
+            messagebox.showwarning('Assignment', response['warning'], parent=self.dashboard.root)
+        self.refresh()
+
+
+class MachinePanel:
+    def __init__(self, dashboard, parent):
+        self.dashboard = dashboard
+        self.machine = None
+        self.profiles = {}
+        self.identity = tk.StringVar(value='Loading machine registration…')
+        self.compliance = tk.StringVar(value='Not checked yet')
+        self.checked = tk.StringVar(value='Last check: —')
+        self.profile = tk.StringVar()
+        frame = ttk.Frame(parent, padding=18)
+        frame.pack(fill='both', expand=True)
+        ttk.Label(frame, text='Machine Management', style='Heading.TLabel').pack(anchor='w', pady=(0, 12))
+        ttk.Label(frame, textvariable=self.identity, justify='left').pack(anchor='w', pady=(0, 16))
+        assignment = ttk.Frame(frame)
+        assignment.pack(fill='x', pady=(0, 15))
+        ttk.Label(assignment, text='Assigned Profile').pack(side='left', padx=(0, 12))
+        self.profile_combo = ttk.Combobox(assignment, textvariable=self.profile, state='readonly', width=36)
+        self.profile_combo.pack(side='left')
+        dashboard.button(assignment, 'Assign Profile', self.assign).pack(side='left', padx=12)
+        ttk.Label(frame, textvariable=self.compliance, style='Heading.TLabel').pack(anchor='w')
+        ttk.Label(frame, textvariable=self.checked).pack(anchor='w', pady=(3, 12))
+        self.requirements = ttk.Treeview(frame, columns=('type', 'state'), show='headings', height=10)
+        for key, title, width in [('type', 'Requirement', 400), ('state', 'State', 180)]:
+            self.requirements.heading(key, text=title)
+            self.requirements.column(key, width=width)
+        self.requirements.pack(fill='both', expand=True)
+        actions = ttk.Frame(frame)
+        actions.pack(fill='x', pady=(15, 0))
+        dashboard.button(actions, 'Refresh Status', self.refresh).pack(side='left')
+        dashboard.button(actions, 'Synchronize', self.synchronize).pack(side='left', padx=10)
+
+    def refresh(self):
+        if self.dashboard.busy:
+            self.dashboard.pending_machine_refresh = True
+            return
+        self.dashboard.pending_machine_refresh = False
+        self.dashboard.request({'action': 'machine_check'}, self.loaded, self.failed)
+
+    def failed(self, message):
+        self.machine = None
+        self.identity.set('Machine management unavailable\n' + message)
+        self.compliance.set('Status: UNAVAILABLE')
+        self.checked.set('Last check: —')
+        self.requirements.delete(*self.requirements.get_children())
+
+    def assign(self):
+        ident = self.profile.get()
+        if ident not in self.profiles or self.dashboard.busy:
+            return
+        self.dashboard.request({'action': 'machine_assign', 'profile_id': ident}, self.assigned)
+
+    def assigned(self, response):
+        self.loaded(response)
+        self.refresh()
+
+    def synchronize(self):
+        if self.dashboard.busy:
+            return
+        if messagebox.askyesno('Synchronize Machine',
+                               'Install missing profile packages and restore required services?',
+                               parent=self.dashboard.root):
+            self.dashboard.request({'action': 'machine_sync'}, self.loaded)
+
+    def loaded(self, response):
+        self.machine = response['machine']
+        self.profiles = {item['profile_id']: item for item in response['profiles']}
+        current = self.machine['assigned_profile']
+        self.profile_combo['values'] = sorted(self.profiles)
+        self.profile.set(current)
+        info = self.profiles.get(current)
+        self.identity.set(f"Machine ID: {self.machine['machine_id']}\n"
+                          f"Hostname: {self.machine['hostname']}\n"
+                          f"Assigned Profile: {current}\n"
+                          f"Profile Version: {info['version'] if info else '—'}")
+        result = response['status']
+        self.requirements.delete(*self.requirements.get_children())
+        if result is None:
+            self.compliance.set('Status: NOT CHECKED')
+            self.checked.set('Last check: —')
+        else:
+            self.compliance.set('Status: COMPLIANT' if result['compliant'] else 'Status: DRIFT DETECTED')
+            self.checked.set('Last check: ' + result['checked_at'])
+            for package in result['packages']:
+                self.requirements.insert('', 'end', values=(f"Package: {package['name']}", package['state'].upper()))
+            for service in result['services']:
+                state = 'ENABLED, ACTIVE' if service['enabled'] and service['active'] else 'DISABLED OR STOPPED'
+                self.requirements.insert('', 'end', values=(f"Service: {service['name']}", state))
+
+
+class Dashboard:
+    def __init__(self, root):
+        self.root = root
+        self.data = {}
+        self.original = {}
+        self.accounts = {}
+        self.revision = None
+        self.selected = None
+        self.clear_after_delete = False
+        self.names = []
+        self.busy = False
+        self.pending_machine_refresh = False
+        self.loading = False
+        self.results = queue.Queue()
+        root.title('EduOS Admin Dashboard')
+        root.geometry('1100x740')
+        root.minsize(900, 620)
+        root.configure(bg=BACKGROUND)
+        root.attributes('-fullscreen', True)
+        root.bind('<F11>', lambda _event: root.attributes('-fullscreen', not root.attributes('-fullscreen')))
+        root.bind('<Escape>', lambda _event: root.attributes('-fullscreen', False))
+        root.protocol('WM_DELETE_WINDOW', self.close)
+        style = ttk.Style(root)
+        style.theme_use('clam')
+        style.configure('TFrame', background=BACKGROUND)
+        style.configure('TLabel', background=BACKGROUND, foreground=FOREGROUND, font=('DejaVu Sans', 10))
+        style.configure('Title.TLabel', font=('DejaVu Sans', 24, 'bold'))
+        style.configure('Heading.TLabel', font=('DejaVu Sans', 12, 'bold'))
+        style.configure('TButton', padding=(10, 7))
+        style.configure('Treeview', background=CARD, fieldbackground=CARD, foreground=FOREGROUND, rowheight=30)
+        style.map('Treeview', background=[('selected', '#2563eb')], foreground=[('selected', '#ffffff')])
+        outer = ttk.Frame(root, padding=22)
+        outer.pack(fill='both', expand=True)
+        ttk.Label(outer, text='EduOS Admin Dashboard', style='Title.TLabel').pack(anchor='w')
+        ttk.Label(outer, text=f'Students, Lab Assignments and Machines  ·  Build: {build_label()}').pack(anchor='w', pady=(4, 18))
+        header_actions = ttk.Frame(outer)
+        header_actions.pack(anchor='e')
+        ttk.Button(header_actions, text='Open Machines',
+                   command=lambda: self.notebook.select(machines_tab)).pack(side='left', padx=(0, 10))
+        ttk.Button(header_actions, text='Exit Dashboard', command=self.close).pack(side='left')
+        self.notebook = ttk.Notebook(outer)
+        self.notebook.pack(fill='both', expand=True)
+        students_tab, labs_tab, machines_tab = (ttk.Frame(self.notebook), ttk.Frame(self.notebook),
+                                                ttk.Frame(self.notebook))
+        self.notebook.add(students_tab, text='Students')
+        self.notebook.add(labs_tab, text='Lab Assignments')
+        self.notebook.add(machines_tab, text='Machines')
+        panes = ttk.Panedwindow(students_tab, orient='horizontal')
+        panes.pack(fill='both', expand=True)
+        left = ttk.Frame(panes, padding=(0, 0, 14, 0))
+        right = ttk.Frame(panes, padding=(14, 0, 0, 0))
+        panes.add(left, weight=1)
+        panes.add(right, weight=3)
+        ttk.Label(left, text='Students', style='Heading.TLabel').pack(anchor='w', pady=(0, 8))
+        self.students = ttk.Treeview(left, show='tree', selectmode='browse', height=12)
+        self.students.column('#0', width=235, minwidth=180)
+        self.students.pack(fill='both', expand=True)
+        self.students.bind('<<TreeviewSelect>>', self.select_student)
+        self.buttons = []
+        self.button(left, 'Create Student', self.create_student).pack(fill='x', pady=(12, 5))
+        self.button(left, 'Delete Student', self.delete_student).pack(fill='x', pady=(0, 5))
+        self.button(left, 'Refresh', self.refresh).pack(fill='x')
+        ttk.Label(right, text='Student Details', style='Heading.TLabel').pack(anchor='w')
+        form = ttk.Frame(right)
+        form.pack(fill='x', pady=12)
+        form.columnconfigure(1, weight=1)
+        self.name = tk.StringVar()
+        self.roll = tk.StringVar()
+        self.info = tk.StringVar(value='Select a student.')
+        self.name_entry = self.entry(form, 0, 'Student name', self.name)
+        self.roll_entry = self.entry(form, 1, 'Roll number', self.roll)
+        ttk.Label(right, textvariable=self.info, justify='left', wraplength=620).pack(anchor='w', pady=(0, 15))
+        ttk.Label(right, text='Assigned Lab Work', style='Heading.TLabel').pack(anchor='w')
+        self.student_labs = ttk.Treeview(right, columns=('progress', 'status'), show='tree headings', height=5)
+        self.student_labs.heading('#0', text='Lab Assignment')
+        self.student_labs.heading('progress', text='Submitted')
+        self.student_labs.heading('status', text='Status')
+        self.student_labs.column('progress', width=90)
+        self.student_labs.column('status', width=120)
+        self.student_labs.pack(fill='both', expand=True)
+        self.student_lab_records = {}
+        self.button(right, 'View Submissions', self.view_submissions).pack(anchor='w')
+        self.button(right, 'Refresh Lab Progress', self.refresh_student_labs).pack(anchor='w')
+        account_controls = ttk.Frame(right)
+        account_controls.pack(fill='x', pady=(8, 0))
+        for index, (label, command) in enumerate([('Save Changes', self.save), ('Reset Password', self.reset_password),
+                               ('Disable Student', lambda: self.account_action('disable')),
+                               ('Enable Student', lambda: self.account_action('enable'))]):
+            self.button(account_controls, label, command).grid(row=index // 2, column=index % 2,
+                                                               sticky='ew', padx=(0, 8), pady=4)
+        account_controls.columnconfigure((0, 1), weight=1)
+        self.labs = AssignmentPanel(self, labs_tab)
+        self.machines = MachinePanel(self, machines_tab)
+        def tab_changed(_event):
+            if self.notebook.select() == str(labs_tab) and not self.busy:
+                self.labs.refresh()
+            elif self.notebook.select() == str(machines_tab):
+                self.machines.refresh()
+        self.notebook.bind('<<NotebookTabChanged>>', tab_changed)
+        self.status = tk.StringVar(value='Loading student data…')
+        ttk.Label(outer, textvariable=self.status, wraplength=1000).pack(anchor='w', pady=(15, 0))
+        self.name.trace_add('write', self.update_form)
+        self.roll.trace_add('write', self.update_form)
+        root.after(100, self.poll)
+        self.refresh()
+
+    def entry(self, frame, row, label, variable):
+        ttk.Label(frame, text=label).grid(row=row, column=0, sticky='w', padx=(0, 15), pady=5)
+        entry = ttk.Entry(frame, textvariable=variable)
+        entry.grid(row=row, column=1, sticky='ew', pady=5)
+        return entry
+
+    def button(self, parent, label, command):
+        button = ttk.Button(parent, text=label, command=command)
+        self.buttons.append(button)
+        return button
+
+    def dirty(self):
+        return self.data != self.original
+
+    def update_form(self, *_args):
+        if self.loading or self.busy or not self.selected:
+            return
+        if self.selected not in self.data:
+            self.data[self.selected] = {'display_name': '', 'roll_number': '', 'tasks': []}
+        self.data[self.selected]['display_name'] = self.name.get()
+        self.data[self.selected]['roll_number'] = self.roll.get()
+        self.status.set('Unsaved academic changes.' if self.dirty() else 'Ready.')
+
+    def request(self, payload, callback, on_error=None):
+        if self.busy:
+            return
+        self.busy = True
+        for widget in self.buttons + [self.name_entry, self.roll_entry, self.machines.profile_combo]:
+            widget.configure(state='disabled')
+        self.status.set('Working… Please wait for this operation to finish.')
+        def worker():
+            try:
+                self.results.put((callback, helper_request(payload), None, on_error))
+            except Exception as error:
+                # Only sanitized helper errors or fixed local messages reach UI.
+                message = str(error) if isinstance(error, RuntimeError) else 'Could not contact the administrator helper.'
+                self.results.put((callback, None, message, on_error))
+            finally:
+                payload.pop('password', None)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def poll(self):
+        try:
+            callback, response, error, on_error = self.results.get_nowait()
+        except queue.Empty:
+            pass
+        else:
+            self.busy = False
+            for widget in self.buttons + [self.name_entry, self.roll_entry]:
+                widget.configure(state='normal')
+            self.machines.profile_combo.configure(state='readonly')
+            if error:
+                self.status.set('Operation failed. Review the message before retrying.')
+                if on_error is not None:
+                    on_error(error)
+                else:
+                    messagebox.showerror('EduOS Admin Dashboard', error, parent=self.root)
+            else:
+                callback(response)
+            if (self.pending_machine_refresh and not self.busy and
+                    self.notebook.tab(self.notebook.select(), 'text') == 'Machines'):
+                self.machines.refresh()
+        self.root.after(100, self.poll)
+
+    def refresh(self):
+        if self.busy:
+            return
+        if self.dirty() and not messagebox.askyesno('Refresh', 'Discard unsaved academic changes and reload?', parent=self.root):
+            return
+        self.request({'action': 'status'}, self.loaded)
+
+    def loaded(self, response):
+        previous = self.selected
+        self.data = response['data']
+        self.original = copy.deepcopy(self.data)
+        self.accounts = response['accounts']
+        self.revision = response['revision']
+        self.loading = True
+        self.students.delete(*self.students.get_children())
+        self.names = sorted(self.accounts)
+        for name in self.names:
+            suffix = ' — metadata missing' if name not in self.data else ''
+            if not self.accounts[name]['exists']:
+                suffix = ' — Linux account missing'
+            self.students.insert('', 'end', iid=name, text=name + suffix)
+        self.selected = None
+        self.loading = False
+        if self.names and not self.clear_after_delete:
+            target = previous if previous in self.names else self.names[0]
+            self.students.selection_set(target)
+            self.students.see(target)
+            self.select_student()
+        else:
+            self.show_details()
+        self.clear_after_delete = False
+        self.status.set(f'{len(self.names)} students loaded.')
+
+    def select_student(self, _event=None):
+        if self.loading:
+            return
+        if self.busy:
+            if self.selected:
+                current = self.students.selection()
+                if current != (self.selected,):
+                    self.students.selection_set(self.selected)
+            return
+        selection = self.students.selection()
+        if selection:
+            self.selected = selection[0]
+            self.show_details()
+
+    def show_details(self):
+        self.loading = True
+        record = self.data.get(self.selected, {})
+        self.name.set(record.get('display_name', ''))
+        self.roll.set(record.get('roll_number', ''))
+        account = self.accounts.get(self.selected, {})
+        self.info.set('\n'.join([
+            f'Linux username: {self.selected or "—"}',
+            f'UID: {account.get("uid", "—")}    GID: {account.get("gid", "—")}',
+            f'Home directory: {account.get("home", "—")}',
+            f'Shell: {account.get("shell", "—")}',
+            f'Account status: {account.get("status", "—")}',
+        ]))
+        self.loading = False
+        self.refresh_student_labs()
+
+    def refresh_student_labs(self):
+        if self.busy:
+            return
+        self.student_labs.delete(*self.student_labs.get_children())
+        self.student_lab_records = {}
+        name = self.selected
+        if not name or not self.accounts.get(name, {}).get('manageable'):
+            return
+        def loaded(response):
+            if self.selected != name:
+                return
+            self.student_lab_records = {a['id']: a for a in response['assignments']}
+            for item in response['assignments']:
+                self.student_labs.insert('', 'end', iid=item['id'], text=f"{item['id']} — {item['title']}",
+                                         values=(f"{item['submitted']} / {item['total']}", item['status']))
+        self.request({'action': 'list_student_submissions', 'username': name}, loaded)
+
+    def view_submissions(self):
+        selection = self.student_labs.selection()
+        if self.busy or not selection:
+            return
+        name = self.selected
+        item = self.student_lab_records[selection[0]]
+        window = tk.Toplevel(self.root)
+        window.title(f"Submissions — {name} — {item['title']}")
+        window.geometry('850x550')
+        box = ttk.Frame(window, padding=16)
+        box.pack(fill='both', expand=True)
+        ttk.Label(box, text=f"{name} — {item['id']} — {item['title']}").pack(anchor='w')
+        questions = ttk.Treeview(box, columns=('status', 'time', 'result'), show='tree headings')
+        questions.heading('#0', text='Problem')
+        questions.heading('status', text='Status')
+        questions.heading('time', text='Submitted at')
+        questions.heading('result', text='Evaluation')
+        questions.pack(fill='both', expand=True)
+        for problem in item['problems']:
+            questions.insert('', 'end', iid=problem['id'], text=f"{problem['id']} — {problem['title']}",
+                             values=(problem['status'], problem.get('submitted_at', '—'), problem.get('result', '—')))
+        def view():
+            selected = questions.selection()
+            if not selected or self.busy:
+                return
+            question = selected[0]
+            def received(response):
+                if response['status'] != 'Submitted':
+                    messagebox.showinfo('Submission', 'This problem is pending or has no readable submission.', parent=self.root)
+                    return
+                viewer = tk.Toplevel(self.root)
+                viewer.title(f'{name} — {item["id"]} — {question}')
+                viewer.geometry('900x650')
+                ttk.Label(viewer, text=f'{name} — {item["id"]} — {question}\nSubmitted: {response["submitted_at"]}').pack(anchor='w')
+                code = ScrolledText(viewer, wrap='none', font=('DejaVu Sans Mono', 11))
+                code.pack(fill='both', expand=True)
+                record = response.get('record')
+                if record:
+                    evaluation = record['evaluation']
+                    details = (f"Student: {record['student']['username']}\nRoll: {record['student']['roll_number']}\n"
+                               f"Task: {record['task']['task_id']} — {record['task']['title']}\n"
+                               f"Submitted: {record['submitted_at']}\nResult: {submissions.summary(record)}\n"
+                               f"Compilation: {'Succeeded' if evaluation['compile_success'] else 'Failed'}\n")
+                    details += evaluation['compile_error'] + '\n'
+                    for index, case in enumerate(evaluation['tests'], 1):
+                        details += f"Test Case {index}: {case['status']}\n{case['error']}\n"
+                    code.insert('end', details + '\nSource Code:\n' + response['code'])
+                else:
+                    code.insert('1.0', response['code'])
+                code.configure(state='disabled')
+            self.request({'action': 'get_submission', 'username': name, 'id': item['id'], 'problem_id': question}, received)
+        ttk.Button(box, text='View Code', command=view).pack(anchor='w')
+
+    def save(self):
+        if self.revision is None or self.busy:
+            return
+        self.request({'action': 'save', 'revision': self.revision, 'data': copy.deepcopy(self.data)}, self.saved)
+
+    def saved(self, response):
+        self.revision = response['revision']
+        self.original = copy.deepcopy(self.data)
+        self.status.set(response['message'])
+        if response.get('warning'):
+            messagebox.showwarning('EduOS Admin Dashboard', response['warning'], parent=self.root)
+
+    def require_saved(self):
+        if self.busy or self.revision is None:
+            return False
+        if self.dirty():
+            messagebox.showinfo('Unsaved changes', 'Save academic changes or refresh before managing Linux accounts.', parent=self.root)
+            return False
+        return True
+
+    def password_dialog(self, title, creating=False):
+        fields = [('username', 'Linux username', '', False), ('roll_number', 'Roll number', '', False),
+                  ('display_name', 'Student name', '', False)] if creating else []
+        fields += [('password', 'Initial password' if creating else 'New password', '', True),
+                   ('confirm_password', 'Confirm password', '', True)]
+        return Editor(self.root, title, fields).result
+
+    def create_student(self):
+        if not self.require_saved():
+            return
+        values = self.password_dialog('Create Student', creating=True)
+        if values:
+            self.request({'action': 'create', 'revision': self.revision, **values}, self.account_done)
+            values.pop('password', None)
+
+    def delete_student(self):
+        if not self.require_saved() or not self.selected or not USERNAME.fullmatch(self.selected):
+            return
+        name = self.selected
+        exists = self.accounts.get(name, {}).get('exists', False)
+        if exists:
+            detail = ('This will remove the Linux account, its home directory, EduOS metadata, '
+                      'submissions, and related local state.')
+        else:
+            detail = ('Linux account: already missing. This will remove the EduOS student record '
+                      'and related local state. A stale home is removed only when its ownership '
+                      'can be verified.')
+        if messagebox.askyesno('Delete Student', f'Delete {name}?\n\n{detail}\n\n'
+                               'This action cannot be undone.', icon='warning', parent=self.root):
+            self.request({'action': 'delete_student', 'revision': self.revision, 'username': name}, self.deleted_student)
+
+    def deleted_student(self, response):
+        if self.selected and self.students.exists(self.selected):
+            self.students.delete(self.selected)
+        self.selected = None
+        self.show_details()
+        self.clear_after_delete = True
+        if response.get('warning'):
+            messagebox.showwarning('Delete Student', response['warning'], parent=self.root)
+        self.refresh()
+
+    def manageable(self):
+        if not self.require_saved() or not self.selected:
+            return False
+        if not self.accounts[self.selected].get('manageable'):
+            messagebox.showerror('Student account', 'Select an existing, non-privileged local student account.', parent=self.root)
+            return False
+        return True
+
+    def reset_password(self):
+        if not self.manageable():
+            return
+        values = self.password_dialog(f'Reset Password — {self.selected}')
+        if values:
+            self.request({'action': 'reset_password', 'username': self.selected, **values}, self.account_done)
+            values.pop('password', None)
+
+    def account_action(self, action):
+        if not self.manageable():
+            return
+        detail = 'This blocks new logins; existing sessions stay open.' if action == 'disable' else 'This restores the account state recorded before disabling.'
+        if messagebox.askyesno(f'{action.title()} Student', f'{action.title()} {self.selected}?\n\n{detail}', parent=self.root):
+            self.request({'action': action, 'username': self.selected}, self.account_done)
+
+    def account_done(self, response):
+        messagebox.showinfo('EduOS Admin Dashboard', response['message'], parent=self.root)
+        if response.get('warning'):
+            messagebox.showwarning('EduOS Admin Dashboard', response['warning'], parent=self.root)
+        self.refresh()
+
+    def close(self):
+        if self.busy:
+            messagebox.showinfo('Operation in progress', 'Wait for the current operation to finish before closing.', parent=self.root)
+            return
+        if self.dirty() and not messagebox.askyesno('Close dashboard', 'Discard unsaved academic changes?', parent=self.root):
+            return
+        self.root.destroy()
+
+
+def main():
+    if not is_administrator():
+        return 1
+    root = tk.Tk()
+    Dashboard(root)
+    root.mainloop()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -1,0 +1,8 @@
+#!/usr/bin/python3 -I
+"""JSON stdin/stdout interface to the unprivileged EduOS Evaluator."""
+import sys
+sys.path.insert(0, '/usr/share/eduos')
+from eduos_evaluator import main
+
+if __name__ == '__main__':
+    raise SystemExit(main())
