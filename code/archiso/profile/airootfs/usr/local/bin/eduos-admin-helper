@@ -24,6 +24,7 @@ sys.path.insert(0, '/usr/share/eduos')
 import eduos_assignments as labs
 import eduos_submissions as submissions
 import eduos_machine as machine
+import eduos_edulab as edulab
 
 ROOT = Path('/var/lib/eduos')
 ASSIGNMENTS = ROOT / 'assignments.json'
@@ -246,6 +247,19 @@ def load_deleted():
         return validate_deleted(decode(read_bytes(DELETED)))
     except FileNotFoundError:
         return {'students': []}
+
+
+def persistent_state_available():
+    """True only when /var/lib/eduos is the separately mounted state disk."""
+    try:
+        return ROOT.is_dir() and os.path.ismount(ROOT)
+    except OSError:
+        return False
+
+
+def require_persistent_state():
+    if not persistent_state_available():
+        raise RequestError('The EDUOS_STATE disk is not mounted. Account changes are disabled so they cannot be lost at reboot.')
 
 
 def local_users():
@@ -476,6 +490,12 @@ def initialize_state():
 def restore_account(name, record, metadata):
     username(name)
     uid, gid = record['uid'], record['gid']
+    shadow = record['shadow']
+    # This Arch image's chage has no -m/--mindays option. Empty and zero both
+    # mean no minimum-age restriction; reject other values rather than silently
+    # weakening a persisted password policy.
+    if shadow['min'] not in ('', '0'):
+        raise RequestError('Persisted minimum password age is unsupported by this image.')
     for entry in pwd.getpwall():
         if entry.pw_uid == uid and entry.pw_name != name:
             raise RequestError('Persisted UID conflicts with an existing Linux account. Restore stopped.')
@@ -496,11 +516,10 @@ def restore_account(name, record, metadata):
     student_account(name)
     roll = metadata.get(name, {}).get('roll_number', name[7:])
     run_account(['/usr/bin/usermod', '--comment', roll, '--shell', '/bin/bash', '--', name])
-    shadow = record['shadow']
     # Hashes, just like incoming passwords, are passed only via stdin.
     run_account(['/usr/bin/chpasswd', '--encrypted'], name + ':' + shadow['hash'] + '\n')
     command = ['/usr/bin/chage']
-    for option, key in [('-d', 'last_change'), ('-m', 'min'), ('-M', 'max'), ('-W', 'warn'), ('-I', 'inactive'), ('-E', 'expire')]:
+    for option, key in [('-d', 'last_change'), ('-M', 'max'), ('-W', 'warn'), ('-I', 'inactive'), ('-E', 'expire')]:
         command += [option, shadow[key] or '-1']
     run_account(command + ['--', name])
 
@@ -516,7 +535,10 @@ def restore_state():
         # Restore all recorded numeric identities before allocating new built-ins.
         for name, record in sorted(registry['students'].items(), key=lambda item: item[1]['uid']):
             if name not in deleted:
-                restore_account(name, record, data)
+                try:
+                    restore_account(name, record, data)
+                except RequestError as error:
+                    raise RequestError(f'Could not restore {name}: {error}') from error
         for index in range(5):
             name = f'student{1000 + index}'
             if name not in data or name in deleted or name in registry['students']:
@@ -527,7 +549,10 @@ def restore_state():
                 run_account(['/usr/bin/useradd', '--create-home', '--user-group', '--comment', str(1000 + index), '--shell', '/bin/bash', '--', name])
                 run_account(['/usr/bin/chpasswd'], f'{name}:user{index + 1}\n')
             student_account(name)
-        persist_accounts()
+        try:
+            persist_accounts()
+        except RequestError as error:
+            raise RequestError(f'Could not save restored account state: {error}') from error
 
 
 def student_has_processes(uid):
@@ -790,11 +815,22 @@ def assignment_request(request):
 
 def dispatch(request):
     shapes = {
+        'edulab_list': {'action'},
+        'edulab_create': {'action', 'assessment'},
+        'edulab_edit': {'action', 'assessment_id', 'assessment'},
+        'edulab_delete': {'action', 'assessment_id'},
+        'edulab_activate': {'action', 'assessment_id'},
+        'edulab_deactivate': {'action', 'assessment_id'},
+        'edulab_reset': {'action', 'assessment_id', 'student'},
+        'edulab_review': {'action', 'assessment_id', 'student', 'feedback', 'final_score'},
         'machine_info': {'action'},
         'machine_check': {'action'},
         'machine_sync': {'action'},
         'machine_demo_drift': {'action'},
         'machine_assign': {'action', 'profile_id'},
+        'machine_snapshot': {'action'},
+        'machine_import': {'action', 'snapshot'},
+        'machine_remove': {'action', 'machine_id'},
         'status': {'action'},
         'list_student_submissions': {'action', 'username'},
         'get_submission': {'action', 'username', 'id', 'problem_id'},
@@ -821,28 +857,42 @@ def dispatch(request):
     if 'revision' in request and (not isinstance(request['revision'], str)
                                   or not re.fullmatch('[0-9a-f]{64}', request['revision'])):
         raise RequestError('A valid data revision is required. Refresh first.')
+    if action.startswith('edulab_'):
+        try:
+            return edulab.admin(action[7:], request)
+        except (edulab.LabError, OSError) as error:
+            raise RequestError(str(error)) from error
     if action.startswith('machine_'):
         try:
             # The same fixed sudo entry point is the sole graphical privilege
             # boundary. Every machine mutation uses the existing admin lock.
             if action == 'machine_info':
                 return {'machine': machine.load_machine(), 'profiles': machine.available_profiles(),
-                        'status': machine.cached_status()}
+                        'status': machine.cached_status(), 'fleet': machine.fleet()}
+            if action == 'machine_snapshot':
+                return {'snapshot': machine.snapshot()}
             with mutation_lock():
+                if action in {'machine_import', 'machine_remove'}:
+                    require_persistent_state()
+                    records = (machine.import_snapshot(request['snapshot']) if action == 'machine_import'
+                               else machine.remove_snapshot(request['machine_id']))
+                    return {'machine': machine.load_machine(), 'profiles': machine.available_profiles(),
+                            'status': machine.cached_status(), 'fleet': records}
                 if action == 'machine_assign':
                     registration = machine.assign_profile(request['profile_id'])
-                    return {'machine': registration, 'profiles': machine.available_profiles(), 'status': None}
+                    return {'machine': registration, 'profiles': machine.available_profiles(),
+                            'status': None, 'fleet': machine.fleet()}
                 if action == 'machine_check':
                     # If boot registration did not complete, the first admin
                     # refresh can safely finish it. Existing records are
                     # validated and never replaced with a new identity.
                     machine.register()
                     return {'machine': machine.load_machine(), 'profiles': machine.available_profiles(),
-                            'status': machine.check(save=True)}
+                            'status': machine.check(save=True), 'fleet': machine.fleet()}
                 if action == 'machine_demo_drift':
                     return machine.demo_drift()
                 return {'machine': machine.load_machine(), 'profiles': machine.available_profiles(),
-                        'status': machine.sync()}
+                        'status': machine.sync(), 'fleet': machine.fleet()}
         except (machine.MachineError, OSError) as error:
             raise RequestError(str(error)) from error
     if action in {'list_student_submissions', 'get_submission'}:
@@ -854,12 +904,15 @@ def dispatch(request):
         return assignment_request(request)
     secure_directory(DATA.parent)
     secure_directory(STATE.parent)
+    if action in {'create', 'delete_student', 'save', 'disable', 'enable', 'reset_password'}:
+        require_persistent_state()
     with mutation_lock(), account_snapshot_on_exit(action):
         data, current = load_data()
         state = load_state()
         if action == 'status':
             names = set(data) | {p.pw_name for p in pwd.getpwall() if USERNAME.fullmatch(p.pw_name)}
             return {'data': data, 'revision': current,
+                    'persistent_state': persistent_state_available(),
                     'accounts': {name: account_info(name, state) for name in sorted(names)}}
         if 'revision' in request and request['revision'] != current:
             raise RequestError('Student data changed since loading. Refresh before saving or creating.')
@@ -878,8 +931,8 @@ def dispatch(request):
             return {'revision': new_revision, 'message': 'Academic metadata saved.', 'warning': warning}
         name = request['username']
         if action == 'create':
-            if name in load_deleted()['students']:
-                raise RequestError('This student ID was permanently deleted. Choose a new student ID.')
+            deleted = load_deleted()
+            reusing_deleted_id = name in deleted['students']
             if name in data:
                 raise RequestError('Student already exists in academic metadata.')
             try:
@@ -896,6 +949,19 @@ def dispatch(request):
             # Check serialized size before creating a Linux account.
             if len((json.dumps(candidate, ensure_ascii=False, indent=2) + '\n').encode('utf-8')) > MAX_BYTES:
                 raise RequestError('Student data would exceed the 1 MiB limit.')
+            # A deletion marker prevents automatic boot-time resurrection. An
+            # explicit, validated administrator creation is different: clear
+            # the marker durably before creating the replacement identity.
+            # If account creation then fails, metadata is still absent, so the
+            # bootstrap loop cannot recreate this name by itself.
+            if reusing_deleted_id:
+                replacement = {'students': [student for student in deleted['students'] if student != name]}
+                try:
+                    _, deleted_warning = atomic_json(DELETED, replacement, 0o600, validate_deleted)
+                except (RequestError, OSError, ValueError) as error:
+                    raise RequestError('Could not clear the prior deletion marker; no account was created.') from error
+                if deleted_warning:
+                    raise RequestError('The prior deletion marker could not be synchronized; no account was created. Retry after checking the state disk.')
             try:
                 run_account(['/usr/bin/useradd', '--create-home', '--user-group', '--shell', '/bin/bash',
                              '--comment', record['roll_number'], '--', name])
@@ -908,13 +974,24 @@ def dispatch(request):
                 raise RequestError('PARTIAL FAILURE: Linux account and home were created, but password setup failed. Metadata was not added. '
                                    'Refresh and recover the locked Linux account administratively, then save its missing metadata. '
                                    'The account and home were retained; do not retry Create Student.')
+            # Commit the recoverable Linux identity before exposing its profile.
+            # If this snapshot fails, a later boot must not show a student row
+            # whose account/password cannot be restored.
+            try:
+                persist_accounts()
+            except (RequestError, OSError, ValueError) as error:
+                raise RequestError('PARTIAL FAILURE: Linux account was created, but its persistent recovery record was not saved. '
+                                   'Metadata was not added. Repair the state disk before rebooting.') from error
             try:
                 new_revision, warning = atomic_json(DATA, candidate, 0o644, validate_data, current)
             except (RequestError, OSError, ValueError):
                 raise RequestError('PARTIAL FAILURE: Linux account, home and password were created, but metadata saving failed. '
                                    'Refresh and save the missing metadata for the existing account. '
                                    'The account and home were retained; do not retry Create Student.')
-            return {'revision': new_revision, 'message': f'{name} created.', 'warning': warning}
+            message = f'{name} created.'
+            if reusing_deleted_id:
+                message += ' The prior deletion marker was cleared.'
+            return {'revision': new_revision, 'message': message, 'warning': warning}
         student_account(name)
         if action == 'disable':
             if name not in state:

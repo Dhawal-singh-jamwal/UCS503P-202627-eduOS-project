@@ -1,0 +1,12 @@
+[Unit]
+Description=Local EduLab student request socket
+# Socket creation only needs /run. The activated service waits for the state
+# disk; ordering this early socket after a regular service creates a boot cycle.
+
+[Socket]
+ListenStream=/run/eduos-edulab.sock
+SocketMode=0666
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

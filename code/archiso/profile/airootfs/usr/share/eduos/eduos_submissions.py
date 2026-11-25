@@ -1,9 +1,8 @@
-"""Latest evaluator submission in the authenticated student's private home tree.
+"""Latest evaluator submission in the authenticated student's persistent state tree.
 
 Admin readers supply a verified account, never a caller-provided filesystem path.
 Records are student-controlled coursework, not trusted grades or attestations.
 """
-import contextlib
 import copy
 import datetime
 import fcntl
@@ -15,8 +14,8 @@ import stat
 import eduos_assignments as labs
 import eduos_evaluator as evaluator
 
-HOME_ROOT = Path('/home')
 MAX_BYTES = 2 * 1024 * 1024
+HOME_ROOT = Path('/home')  # Expected Linux home, not the submission storage location.
 STATUSES = {'PASS', 'FAIL', 'RUNTIME ERROR', 'TIME LIMIT EXCEEDED', 'OUTPUT LIMIT EXCEEDED'}
 
 
@@ -71,37 +70,10 @@ def validate(record, entry, ident, question):
     return record
 
 
-@contextlib.contextmanager
 def directory(entry, create=False):
-    if (not labs.STUDENT.fullmatch(entry.pw_name) or entry.pw_uid < 1000
-            or entry.pw_dir != str(HOME_ROOT / entry.pw_name)):
-        raise ValueError('Invalid student home identity.')
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open(HOME_ROOT, flags)
-    try:
-        info = os.fstat(fd)
-        if info.st_uid != 0 or info.st_mode & 0o022:
-            raise ValueError('Unsafe home root.')
-        for index, component in enumerate((entry.pw_name, '.local', 'share', 'eduos', 'submissions')):
-            if create and index:
-                try:
-                    os.mkdir(component, 0o700, dir_fd=fd)
-                except FileExistsError:
-                    pass
-                else:
-                    os.fsync(fd)
-            child = os.open(component, flags, dir_fd=fd)
-            info = os.fstat(child)
-            # Home/.local/share may be traversable, but not writable by other users.
-            forbidden = 0o077 if index >= 3 else 0o022
-            if info.st_uid != entry.pw_uid or info.st_mode & forbidden:
-                os.close(child)
-                raise ValueError('Unsafe submission directory ownership or permissions.')
-            os.close(fd)
-            fd = child
-        yield fd
-    finally:
-        os.close(fd)
+    if entry.pw_uid < 1000 or entry.pw_dir != str(HOME_ROOT / entry.pw_name):
+        raise ValueError('Invalid student identity.')
+    return labs.private_directory(labs.SUBMISSIONS, entry, (), create=create)
 
 
 def read(entry, ident, question):

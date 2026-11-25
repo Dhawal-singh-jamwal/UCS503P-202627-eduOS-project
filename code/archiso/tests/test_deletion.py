@@ -202,7 +202,7 @@ class DeletionTests(unittest.TestCase):
         self.reboot()
         self.assertIn('student1005', self.users)
 
-    def test_other_student_and_create_remain_available(self):
+    def test_deleted_id_can_be_explicitly_recreated_and_restored(self):
         self.data['student1001'] = {'roll_number': '1001', 'display_name': 'Other', 'tasks': []}
         self.data_path.write_text(json.dumps(self.data))
         self.users['student1001'] = existing.account('student1001', 1002, 1002)
@@ -215,10 +215,32 @@ class DeletionTests(unittest.TestCase):
         self.assertIn('student1001', json.loads(self.data_path.read_text()))
         self.assertIn('student1001', helper.load_registry()['students'])
         self.assertIn('student1001', self.users)
-        with self.assertRaisesRegex(helper.RequestError, 'permanently deleted'):
+        result = helper.dispatch({'action': 'create', 'revision': helper.revision(self.data_path.read_bytes()),
+                                  'username': 'student1000', 'roll_number': '1000',
+                                  'display_name': 'Reused ID', 'password': 'SECRET'})
+        self.assertIn('deletion marker was cleared', result['message'])
+        self.assertEqual(helper.load_deleted()['students'], [])
+        self.assertEqual(json.loads(self.data_path.read_text())['student1000']['display_name'], 'Reused ID')
+        self.assertIn('student1000', helper.load_registry()['students'])
+        self.reboot()
+        self.assertIn('student1000', self.users)
+        self.assertEqual(json.loads(self.data_path.read_text())['student1000']['display_name'], 'Reused ID')
+
+    def test_recreate_does_not_start_if_tombstone_clear_fails(self):
+        self.delete()
+        original_atomic = helper.atomic_json
+        def fail_deleted(path, *args, **kwargs):
+            if path == helper.DELETED:
+                raise OSError('state disk failure')
+            return original_atomic(path, *args, **kwargs)
+        self.commands.reset_mock()
+        with patch.object(helper, 'atomic_json', side_effect=fail_deleted), \
+                self.assertRaisesRegex(helper.RequestError, 'no account was created'):
             helper.dispatch({'action': 'create', 'revision': helper.revision(self.data_path.read_bytes()),
                              'username': 'student1000', 'roll_number': '1000',
-                             'display_name': 'Reused ID', 'password': 'SECRET'})
+                             'display_name': 'Replacement', 'password': 'SECRET'})
+        self.assertNotIn('student1000', self.users)
+        self.assertFalse(any(call.args[0][0].endswith('/useradd') for call in self.commands.call_args_list))
 
     def test_gui_orphan_delete_uses_confirmation_and_helper(self):
         sent = []

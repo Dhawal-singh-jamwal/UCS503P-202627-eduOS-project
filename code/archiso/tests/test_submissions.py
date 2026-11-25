@@ -1,4 +1,4 @@
-"""Evaluator submissions in temporary fake homes; no privileged host operations."""
+"""Evaluator submissions in a temporary persistent-state tree."""
 import contextlib
 import copy
 import datetime
@@ -36,6 +36,9 @@ class SubmissionTests(unittest.TestCase):
         self.homes.mkdir(mode=0o755)
         self.home = self.homes / 'student1000'
         self.home.mkdir(mode=0o700)
+        self.state_submissions = self.path / 'submissions'
+        self.state_submissions.mkdir(mode=0o755)
+        (self.state_submissions / 'student1000').mkdir(mode=0o700)
         self.entry = types.SimpleNamespace(pw_name='student1000', pw_uid=os.getuid(), pw_dir=str(self.home))
         self.problem = {**problem(), 'test_cases': copy.deepcopy(CASES)}
         self.store = document()
@@ -43,16 +46,17 @@ class SubmissionTests(unittest.TestCase):
         self.assignments = self.path / 'assignments.json'
         self.assignments.write_text(json.dumps(self.store))
         (self.path / 'student-data.json').write_text(json.dumps({'student1000': {'roll_number': '1000'}}))
-        self.destination = self.home / '.local/share/eduos/submissions/LAB-0001-Q1.json'
+        self.destination = self.state_submissions / 'student1000/LAB-0001-Q1.json'
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(submissions, 'HOME_ROOT', self.homes))
+        self.stack.enter_context(patch.object(labs, 'SUBMISSIONS', self.state_submissions))
         self.stack.enter_context(patch.object(labs, 'STATE_ROOT', self.path))
         self.stack.enter_context(patch.object(labs, 'identity', return_value=self.entry))
         self.selected = self.stack.enter_context(patch.object(labs, 'selected_problem', side_effect=lambda *args: copy.deepcopy(self.problem)))
         self.evaluate = self.stack.enter_context(patch.object(submissions.evaluator, 'evaluate_cpp', return_value=result()))
         real_fstat = os.fstat
-        root_inode = self.homes.stat().st_ino
+        root_inode = self.state_submissions.stat().st_ino
         def fstat(fd):
             info = real_fstat(fd)
             if info.st_ino == root_inode:
@@ -257,12 +261,15 @@ class SubmissionTests(unittest.TestCase):
     def test_directory_symlink_and_writable_parent_rejected(self):
         outside = self.path / 'outside'
         outside.mkdir()
-        (self.home / '.local').symlink_to(outside, target_is_directory=True)
+        student_dir = self.state_submissions / 'student1000'
+        student_dir.rmdir()
+        student_dir.symlink_to(outside, target_is_directory=True)
         with self.assertRaises(OSError):
             self.submit()
         self.assertEqual(list(outside.iterdir()), [])
-        (self.home / '.local').unlink()
-        self.home.chmod(0o777)
+        student_dir.unlink()
+        student_dir.mkdir(mode=0o700)
+        student_dir.chmod(0o777)
         with self.assertRaises(ValueError):
             self.submit()
 

@@ -9,6 +9,9 @@ if os.getuid() != 0 or os.geteuid() != 0 or len(sys.argv) != 1:
 try:
     helper = runpy.run_path('/usr/local/bin/eduos-admin-helper', run_name='eduos_boot_helper')
     helper['restore_state']()
-except Exception:
-    # Never print exception contents that could include password hashes.
-    raise SystemExit('EduOS persistent restoration failed. State was retained; inspect disk/identity conflicts before login.')
+except Exception as error:
+    # RequestError messages are deliberately sanitized by the helper. Other
+    # exceptions may include private record contents, so keep those generic.
+    if 'helper' in locals() and isinstance(error, helper['RequestError']):
+        raise SystemExit(f'EduOS persistent restoration failed: {error}') from None
+    raise SystemExit('EduOS persistent restoration failed unexpectedly. State was retained.') from None

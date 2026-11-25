@@ -180,6 +180,8 @@ class StorageAndAccountTests(unittest.TestCase):
         self.commands = self.stack.enter_context(patch.object(helper, 'run_account'))
         self.persist = self.stack.enter_context(patch.object(helper, 'persist_accounts'))
         self.views = self.stack.enter_context(patch.object(helper, 'regenerate_views'))
+        self.persistent_state = self.stack.enter_context(
+            patch.object(helper, 'persistent_state_available', return_value=True))
 
     def request(self, action, **fields):
         return helper.dispatch({'action': action, **fields})

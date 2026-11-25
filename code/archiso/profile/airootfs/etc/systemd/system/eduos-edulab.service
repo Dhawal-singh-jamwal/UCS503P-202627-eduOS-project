@@ -1,0 +1,13 @@
+[Unit]
+Description=Local EduLab assessment service
+Requires=eduos-state.service
+After=eduos-state.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/eduos-edulab-service
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/eduos /run

@@ -6,6 +6,11 @@ if [[ ! -f "$state_image" || -L "$state_image" ]]; then
     echo "Create the state disk first: $project_root/scripts/create-eduos-state-disk.sh" >&2
     exit 1
 fi
+exec 9>"$project_root/runtime/.state-use.lock"
+if ! flock -n 9; then
+    echo 'The EduOS state image is already in use.' >&2
+    exit 1
+fi
 if (( $# > 1 )); then
     echo "Usage: $0 [path/to/eduos.iso]" >&2
     exit 2

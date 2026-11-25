@@ -18,13 +18,15 @@ from tkinter.scrolledtext import ScrolledText
 sys.path.insert(0, '/usr/share/eduos')
 import eduos_assignments as labs
 import eduos_submissions as submissions
+from eduos_edulab_admin import EduLabPanel
+import eduos_ui as ui
 
 
 HELPER = '/usr/local/bin/eduos-admin-helper'
 USERNAME = re.compile(r'student[0-9]{4}', re.ASCII)
-BACKGROUND = '#111827'
-CARD = '#1f2937'
-FOREGROUND = '#f9fafb'
+BACKGROUND = ui.BACKGROUND
+CARD = ui.SURFACE
+FOREGROUND = ui.TEXT
 BUILD_INFO = Path('/usr/share/eduos/build-info.txt')
 
 
@@ -59,10 +61,12 @@ def helper_request(request):
 class Editor(tk.Toplevel):
     def __init__(self, parent, title, fields):
         super().__init__(parent)
+        ui.install_theme(self)
+        ui.protect_popup(self, parent)
         self.title(title)
         self.transient(parent)
         self.resizable(False, False)
-        self.configure(bg=BACKGROUND)
+        self.configure(bg=ui.BACKGROUND)
         self.result = None
         self.fields = fields
         self.variables = {}
@@ -87,6 +91,7 @@ class Editor(tk.Toplevel):
         self.grab_set()
         if first:
             first.focus_set()
+        ui.refresh_classic_widgets(self)
         self.wait_window()
 
     def clear_secrets(self):
@@ -122,6 +127,8 @@ class Editor(tk.Toplevel):
 class ProblemEditor(tk.Toplevel):
     def __init__(self, parent, problem):
         super().__init__(parent)
+        ui.install_theme(self)
+        ui.protect_popup(self, parent)
         self.title('Problem ' + problem['id'])
         self.transient(parent)
         self.geometry('800x650')
@@ -162,11 +169,13 @@ class ProblemEditor(tk.Toplevel):
             for key, label in [('input', 'Input'), ('expected_output', 'Expected Output')]:
                 ttk.Label(page, text=label).pack(anchor='w')
                 widget = ScrolledText(page, height=5, wrap='none', font=('DejaVu Sans Mono', 11), undo=True)
+                ui.code_widget(widget)
                 widget.pack(fill='both', expand=True)
                 widget.insert('1.0', case[key])
                 widgets[key] = widget
             self.test_widgets.append(widgets)
         self.grab_set()
+        ui.refresh_classic_widgets(self)
         self.wait_window()
 
     def apply(self):
@@ -187,6 +196,8 @@ class ProblemEditor(tk.Toplevel):
 class AssignmentEditor(tk.Toplevel):
     def __init__(self, parent, students, assignment=None):
         super().__init__(parent)
+        ui.install_theme(self)
+        ui.protect_popup(self, parent)
         self.title('Edit Lab Assignment' if assignment else 'Create Lab Assignment')
         self.transient(parent)
         self.geometry('850x650')
@@ -237,6 +248,7 @@ class AssignmentEditor(tk.Toplevel):
         self.list.pack(fill='both', expand=True)
         self.redraw()
         self.grab_set()
+        ui.refresh_classic_widgets(self)
         self.wait_window()
 
     def redraw(self):
@@ -325,6 +337,8 @@ class AssignmentPanel:
         if selected and selected[0] in self.records:
             self.list.selection_set(selected[0])
         self.show()
+        if hasattr(self.dashboard, 'overview_assignments'):
+            self.dashboard.overview_assignments.set(str(len(self.records)))
         self.dashboard.status.set(f'{len(self.records)} lab assignments loaded.')
 
     def selected(self):
@@ -431,16 +445,81 @@ class MachinePanel:
         self.profile_combo.pack(side='left')
         dashboard.button(assignment, 'Assign Profile', self.assign).pack(side='left', padx=12)
         ttk.Label(frame, textvariable=self.compliance, style='Heading.TLabel').pack(anchor='w')
-        ttk.Label(frame, textvariable=self.checked).pack(anchor='w', pady=(3, 12))
-        self.requirements = ttk.Treeview(frame, columns=('type', 'state'), show='headings', height=10)
+        ttk.Label(frame, textvariable=self.checked).pack(anchor='w', pady=(3, 6))
+        local_actions = ttk.Frame(frame)
+        local_actions.pack(fill='x', pady=(0, 8))
+        dashboard.button(local_actions, 'Refresh Status', self.refresh).pack(side='left')
+        dashboard.button(local_actions, 'Synchronize', self.synchronize).pack(side='left', padx=10)
+        self.requirements = ttk.Treeview(frame, columns=('type', 'state'), show='headings', height=4)
         for key, title, width in [('type', 'Requirement', 400), ('state', 'State', 180)]:
             self.requirements.heading(key, text=title)
             self.requirements.column(key, width=width)
         self.requirements.pack(fill='both', expand=True)
-        actions = ttk.Frame(frame)
-        actions.pack(fill='x', pady=(15, 0))
-        dashboard.button(actions, 'Refresh Status', self.refresh).pack(side='left')
-        dashboard.button(actions, 'Synchronize', self.synchronize).pack(side='left', padx=10)
+        ttk.Label(frame, text='Imported PCs (unverified snapshots)', style='Heading.TLabel').pack(
+            anchor='w', pady=(8, 4))
+        fleet_actions = ttk.Frame(frame)
+        fleet_actions.pack(fill='x', pady=(0, 8))
+        dashboard.button(fleet_actions, 'Export This PC', self.export_snapshot).pack(side='left')
+        dashboard.button(fleet_actions, 'Import PC Status', self.import_snapshot).pack(side='left', padx=8)
+        dashboard.button(fleet_actions, 'Remove Imported PC', self.remove_snapshot).pack(side='left')
+        self.fleet_view = ttk.Treeview(frame, columns=('host', 'profile', 'state', 'checked'),
+                                       show='tree headings', height=3)
+        self.fleet_view.heading('#0', text='Machine ID')
+        self.fleet_view.column('#0', width=210)
+        for key, label, width in [('host', 'Hostname', 180), ('profile', 'Profile', 185),
+                                  ('state', 'Status', 125), ('checked', 'Checked at', 195)]:
+            self.fleet_view.heading(key, text=label)
+            self.fleet_view.column(key, width=width)
+        self.fleet_view.pack(fill='both', expand=True)
+
+    def export_snapshot(self):
+        if not self.dashboard.busy:
+            self.dashboard.request({'action': 'machine_snapshot'}, self.save_snapshot)
+
+    def save_snapshot(self, response):
+        from tkinter import filedialog
+        identifier = response['snapshot']['machine']['machine_id']
+        path = filedialog.asksaveasfilename(parent=self.dashboard.root, title='Export This PC',
+            initialfile=identifier + '.json', defaultextension='.json', filetypes=[('JSON files', '*.json')])
+        if not path:
+            return
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                json.dump(response['snapshot'], stream, indent=2)
+                stream.write('\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError as error:
+            messagebox.showerror('Export This PC', str(error), parent=self.dashboard.root)
+
+    def import_snapshot(self):
+        from tkinter import filedialog
+        if self.dashboard.busy:
+            return
+        path = filedialog.askopenfilename(parent=self.dashboard.root, title='Import PC Status',
+                                          filetypes=[('JSON files', '*.json')])
+        if not path:
+            return
+        try:
+            with open(path, 'rb') as source:
+                raw = source.read(65537)
+            if len(raw) > 65536:
+                raise ValueError('Snapshot exceeds 64 KiB.')
+            snapshot = json.loads(raw)
+        except (OSError, ValueError) as error:
+            messagebox.showerror('Import PC Status', str(error), parent=self.dashboard.root)
+            return
+        self.dashboard.request({'action': 'machine_import', 'snapshot': snapshot}, self.loaded)
+
+    def remove_snapshot(self):
+        selected = self.fleet_view.selection()
+        if not selected or self.dashboard.busy:
+            return
+        identifier = selected[0]
+        if messagebox.askyesno('Remove Imported PC', f'Remove {identifier} from this local view?',
+                               parent=self.dashboard.root):
+            self.dashboard.request({'action': 'machine_remove', 'machine_id': identifier}, self.loaded)
 
     def refresh(self):
         if self.dashboard.busy:
@@ -455,6 +534,9 @@ class MachinePanel:
         self.compliance.set('Status: UNAVAILABLE')
         self.checked.set('Last check: —')
         self.requirements.delete(*self.requirements.get_children())
+        dashboard = getattr(self, 'dashboard', None)
+        if dashboard is not None and hasattr(dashboard, 'overview_machine'):
+            dashboard.overview_machine.set('Unavailable')
 
     def assign(self):
         ident = self.profile.get()
@@ -487,12 +569,23 @@ class MachinePanel:
                           f"Profile Version: {info['version'] if info else '—'}")
         result = response['status']
         self.requirements.delete(*self.requirements.get_children())
+        self.fleet_view.delete(*self.fleet_view.get_children())
+        for identifier, record in sorted(response.get('fleet', {}).items()):
+            snapshot = record['snapshot']
+            status = snapshot['status']
+            self.fleet_view.insert('', 'end', iid=identifier, text=identifier,
+                values=(snapshot['machine']['hostname'], status['profile_id'],
+                        'Compliant' if status['compliant'] else 'Drift', status['checked_at']))
         if result is None:
             self.compliance.set('Status: NOT CHECKED')
             self.checked.set('Last check: —')
+            if hasattr(self.dashboard, 'overview_machine'):
+                self.dashboard.overview_machine.set('Not checked')
         else:
             self.compliance.set('Status: COMPLIANT' if result['compliant'] else 'Status: DRIFT DETECTED')
             self.checked.set('Last check: ' + result['checked_at'])
+            if hasattr(self.dashboard, 'overview_machine'):
+                self.dashboard.overview_machine.set('Compliant' if result['compliant'] else 'Drift detected')
             for package in result['packages']:
                 self.requirements.insert('', 'end', values=(f"Package: {package['name']}", package['state'].upper()))
             for service in result['services']:
@@ -518,51 +611,110 @@ class Dashboard:
         root.geometry('1100x740')
         root.minsize(900, 620)
         root.configure(bg=BACKGROUND)
-        root.attributes('-fullscreen', True)
-        root.bind('<F11>', lambda _event: root.attributes('-fullscreen', not root.attributes('-fullscreen')))
-        root.bind('<Escape>', lambda _event: root.attributes('-fullscreen', False))
+        mode = ui.install_theme(root)
+        ui.set_fullscreen(root, True)
+        root.bind('<F11>', lambda _event: ui.toggle_fullscreen(root))
+        root.bind('<Escape>', lambda _event: ui.set_fullscreen(root, False))
         root.protocol('WM_DELETE_WINDOW', self.close)
-        style = ttk.Style(root)
-        style.theme_use('clam')
-        style.configure('TFrame', background=BACKGROUND)
-        style.configure('TLabel', background=BACKGROUND, foreground=FOREGROUND, font=('DejaVu Sans', 10))
-        style.configure('Title.TLabel', font=('DejaVu Sans', 24, 'bold'))
-        style.configure('Heading.TLabel', font=('DejaVu Sans', 12, 'bold'))
-        style.configure('TButton', padding=(10, 7))
-        style.configure('Treeview', background=CARD, fieldbackground=CARD, foreground=FOREGROUND, rowheight=30)
-        style.map('Treeview', background=[('selected', '#2563eb')], foreground=[('selected', '#ffffff')])
-        outer = ttk.Frame(root, padding=22)
+        outer = ttk.Frame(root, padding=(24, 18))
         outer.pack(fill='both', expand=True)
-        ttk.Label(outer, text='EduOS Admin Dashboard', style='Title.TLabel').pack(anchor='w')
-        ttk.Label(outer, text=f'Students, Lab Assignments and Machines  ·  Build: {build_label()}').pack(anchor='w', pady=(4, 18))
-        header_actions = ttk.Frame(outer)
-        header_actions.pack(anchor='e')
-        ttk.Button(header_actions, text='Open Machines',
-                   command=lambda: self.notebook.select(machines_tab)).pack(side='left', padx=(0, 10))
-        ttk.Button(header_actions, text='Exit Dashboard', command=self.close).pack(side='left')
-        self.notebook = ttk.Notebook(outer)
+        header = ttk.Frame(outer)
+        header.pack(fill='x', pady=(0, 16))
+        ttk.Label(header, text='EduOS Admin Dashboard', style='Title.TLabel').pack(side='left', anchor='w')
+        ttk.Label(header, text=f'Build  {build_label()}', style='Subtitle.TLabel').pack(side='right', anchor='e')
+
+        shell = ttk.Frame(outer)
+        shell.pack(fill='both', expand=True)
+        sidebar = ttk.Frame(shell, style='Sidebar.TFrame', padding=(14, 20), width=220)
+        sidebar.pack(side='left', fill='y', padx=(0, 18))
+        sidebar.pack_propagate(False)
+        ttk.Label(sidebar, text='EduOS', style='SidebarTitle.TLabel').pack(anchor='w', padx=7)
+        ttk.Label(sidebar, text='ACADEMIC COMPUTING', style='SidebarMuted.TLabel').pack(anchor='w', padx=7, pady=(2, 22))
+
+        content = ttk.Frame(shell)
+        content.pack(side='left', fill='both', expand=True)
+        self.notebook = ttk.Notebook(content, style='Navigation.TNotebook')
         self.notebook.pack(fill='both', expand=True)
-        students_tab, labs_tab, machines_tab = (ttk.Frame(self.notebook), ttk.Frame(self.notebook),
-                                                ttk.Frame(self.notebook))
+        overview_tab, students_tab, labs_tab, machines_tab, edulab_tab = (
+            ttk.Frame(self.notebook), ttk.Frame(self.notebook), ttk.Frame(self.notebook),
+            ttk.Frame(self.notebook), ttk.Frame(self.notebook))
+        self.notebook.add(overview_tab, text='Overview')
         self.notebook.add(students_tab, text='Students')
         self.notebook.add(labs_tab, text='Lab Assignments')
         self.notebook.add(machines_tab, text='Machines')
+        self.notebook.add(edulab_tab, text='EduLab')
+
+        self.nav_buttons = {}
+        pages = [('Overview', overview_tab), ('Students', students_tab),
+                 ('Lab Assignments', labs_tab), ('EduLab', edulab_tab), ('Machines', machines_tab)]
+        for label, page in pages:
+            button = ttk.Button(sidebar, text=label, style='Nav.TButton',
+                                command=lambda target=page: self.notebook.select(target))
+            button.pack(fill='x', pady=2)
+            self.nav_buttons[str(page)] = button
+        sidebar_actions = ttk.Frame(sidebar, style='Sidebar.TFrame')
+        sidebar_actions.pack(side='bottom', fill='x')
+        self.theme_label = tk.StringVar(value=ui.theme_action(mode))
+        ttk.Button(sidebar_actions, textvariable=self.theme_label, style='Nav.TButton',
+                   command=self.switch_theme).pack(fill='x', pady=(0, 2))
+        ttk.Separator(sidebar_actions).pack(fill='x', pady=(0, 12))
+        ttk.Button(sidebar_actions, text='Log Out / Switch User', style='Nav.TButton',
+                   command=self.logout).pack(fill='x')
+        ttk.Button(sidebar_actions, text='Exit Dashboard', style='Nav.TButton',
+                   command=self.close).pack(fill='x', pady=(2, 0))
+
+        ttk.Label(overview_tab, text='Overview', style='PageTitle.TLabel').pack(anchor='w', pady=(2, 4))
+        ttk.Label(overview_tab, text='A quick view of your academic environment.',
+                  style='Subtitle.TLabel').pack(anchor='w', pady=(0, 18))
+        metrics = ttk.Frame(overview_tab)
+        metrics.pack(fill='x')
+        self.overview_students = tk.StringVar(value='—')
+        self.overview_active = tk.StringVar(value='—')
+        self.overview_assignments = tk.StringVar(value='—')
+        self.overview_machine = tk.StringVar(value='Not checked')
+        for column, (label, variable, hint) in enumerate([
+                ('Students', self.overview_students, 'registered records'),
+                ('Active accounts', self.overview_active, 'available for login'),
+                ('Lab assignments', self.overview_assignments, 'configured labs'),
+                ('Machine status', self.overview_machine, 'desired-state compliance')]):
+            card = ttk.Frame(metrics, style='Card.TFrame', padding=18)
+            card.grid(row=0, column=column, sticky='nsew', padx=(0, 10 if column < 3 else 0))
+            ttk.Label(card, text=label, style='Info.TLabel').pack(anchor='w')
+            ttk.Label(card, textvariable=variable, style='Metric.TLabel', wraplength=180).pack(anchor='w', pady=(8, 3))
+            ttk.Label(card, text=hint, style='Info.TLabel').pack(anchor='w')
+            metrics.columnconfigure(column, weight=1)
+        welcome = ttk.Frame(overview_tab, style='Card.TFrame', padding=22)
+        welcome.pack(fill='both', expand=True, pady=(18, 0))
+        ttk.Label(welcome, text='Environment management', style='CardTitle.TLabel').pack(anchor='w')
+        ttk.Label(welcome, text=('Use the navigation on the left to manage student accounts, normal lab work, '
+                                 'timed EduLab assessments, and this machine\'s laboratory profile.'),
+                  style='Info.TLabel', wraplength=760, justify='left').pack(anchor='w', pady=(8, 0))
+
         panes = ttk.Panedwindow(students_tab, orient='horizontal')
         panes.pack(fill='both', expand=True)
         left = ttk.Frame(panes, padding=(0, 0, 14, 0))
         right = ttk.Frame(panes, padding=(14, 0, 0, 0))
         panes.add(left, weight=1)
         panes.add(right, weight=3)
-        ttk.Label(left, text='Students', style='Heading.TLabel').pack(anchor='w', pady=(0, 8))
+        ttk.Label(left, text='Students', style='PageTitle.TLabel').pack(anchor='w', pady=(0, 4))
+        ttk.Label(left, text='Search and select an account', style='Subtitle.TLabel').pack(anchor='w', pady=(0, 10))
+        self.student_filter = tk.StringVar()
+        search = ttk.Entry(left, textvariable=self.student_filter)
+        search.pack(fill='x', pady=(0, 10))
         self.students = ttk.Treeview(left, show='tree', selectmode='browse', height=12)
+        ui.configure_tree_tags(self.students)
         self.students.column('#0', width=235, minwidth=180)
         self.students.pack(fill='both', expand=True)
         self.students.bind('<<TreeviewSelect>>', self.select_student)
         self.buttons = []
-        self.button(left, 'Create Student', self.create_student).pack(fill='x', pady=(12, 5))
-        self.button(left, 'Delete Student', self.delete_student).pack(fill='x', pady=(0, 5))
+        create_button = self.button(left, 'Create Student', self.create_student)
+        create_button.configure(style='Primary.TButton')
+        create_button.pack(fill='x', pady=(12, 5))
+        delete_button = self.button(left, 'Delete Student', self.delete_student)
+        delete_button.configure(style='Danger.TButton')
+        delete_button.pack(fill='x', pady=(0, 5))
         self.button(left, 'Refresh', self.refresh).pack(fill='x')
-        ttk.Label(right, text='Student Details', style='Heading.TLabel').pack(anchor='w')
+        ttk.Label(right, text='Student Details', style='PageTitle.TLabel').pack(anchor='w')
         form = ttk.Frame(right)
         form.pack(fill='x', pady=12)
         form.columnconfigure(1, weight=1)
@@ -581,8 +733,10 @@ class Dashboard:
         self.student_labs.column('status', width=120)
         self.student_labs.pack(fill='both', expand=True)
         self.student_lab_records = {}
-        self.button(right, 'View Submissions', self.view_submissions).pack(anchor='w')
-        self.button(right, 'Refresh Lab Progress', self.refresh_student_labs).pack(anchor='w')
+        lab_actions = ttk.Frame(right)
+        lab_actions.pack(fill='x', pady=(8, 0))
+        self.button(lab_actions, 'View Submissions', self.view_submissions).pack(side='left')
+        self.button(lab_actions, 'Refresh Progress', self.refresh_student_labs).pack(side='left', padx=8)
         account_controls = ttk.Frame(right)
         account_controls.pack(fill='x', pady=(8, 0))
         for index, (label, command) in enumerate([('Save Changes', self.save), ('Reset Password', self.reset_password),
@@ -593,16 +747,29 @@ class Dashboard:
         account_controls.columnconfigure((0, 1), weight=1)
         self.labs = AssignmentPanel(self, labs_tab)
         self.machines = MachinePanel(self, machines_tab)
+        self.edulab = EduLabPanel(self, edulab_tab)
         def tab_changed(_event):
+            selected = self.notebook.select()
+            for page, button in self.nav_buttons.items():
+                button.configure(style='Selected.Nav.TButton' if page == selected else 'Nav.TButton')
             if self.notebook.select() == str(labs_tab) and not self.busy:
                 self.labs.refresh()
             elif self.notebook.select() == str(machines_tab):
                 self.machines.refresh()
+            elif self.notebook.select() == str(edulab_tab) and not self.busy:
+                self.edulab.refresh()
         self.notebook.bind('<<NotebookTabChanged>>', tab_changed)
+        self.notebook.select(overview_tab)
+        tab_changed(None)
         self.status = tk.StringVar(value='Loading student data…')
-        ttk.Label(outer, textvariable=self.status, wraplength=1000).pack(anchor='w', pady=(15, 0))
+        status_bar = ttk.Frame(outer, style='Card.TFrame', padding=(12, 7))
+        status_bar.pack(fill='x', pady=(12, 0))
+        ttk.Label(status_bar, text='●', style='Success.TLabel').pack(side='left', padx=(0, 7))
+        ttk.Label(status_bar, textvariable=self.status, style='Info.TLabel', wraplength=1000).pack(side='left')
         self.name.trace_add('write', self.update_form)
         self.roll.trace_add('write', self.update_form)
+        self.student_filter.trace_add('write', lambda *_args: self.render_students())
+        ui.refresh_classic_widgets(root)
         root.after(100, self.poll)
         self.refresh()
 
@@ -612,8 +779,8 @@ class Dashboard:
         entry.grid(row=row, column=1, sticky='ew', pady=5)
         return entry
 
-    def button(self, parent, label, command):
-        button = ttk.Button(parent, text=label, command=command)
+    def button(self, parent, label, command, style='TButton'):
+        button = ttk.Button(parent, text=label, command=command, style=style)
         self.buttons.append(button)
         return button
 
@@ -684,13 +851,8 @@ class Dashboard:
         self.accounts = response['accounts']
         self.revision = response['revision']
         self.loading = True
-        self.students.delete(*self.students.get_children())
         self.names = sorted(self.accounts)
-        for name in self.names:
-            suffix = ' — metadata missing' if name not in self.data else ''
-            if not self.accounts[name]['exists']:
-                suffix = ' — Linux account missing'
-            self.students.insert('', 'end', iid=name, text=name + suffix)
+        self.render_students()
         self.selected = None
         self.loading = False
         if self.names and not self.clear_after_delete:
@@ -701,7 +863,39 @@ class Dashboard:
         else:
             self.show_details()
         self.clear_after_delete = False
-        self.status.set(f'{len(self.names)} students loaded.')
+        self.overview_students.set(str(len(self.names)))
+        active = sum(1 for account in self.accounts.values()
+                     if account.get('exists') and account.get('status') != 'disabled')
+        self.overview_active.set(str(active))
+        if response.get('persistent_state', True):
+            self.status.set(f'{len(self.names)} students loaded. Persistent state disk mounted.')
+        else:
+            self.status.set('WARNING: EDUOS_STATE disk is not mounted. Account changes are disabled to prevent data loss.')
+
+    def render_students(self):
+        """Render the account list through the local UI filter only."""
+        if not hasattr(self, 'students'):
+            return
+        query = self.student_filter.get().strip().lower() if hasattr(self, 'student_filter') else ''
+        current = self.students.selection()
+        self.students.delete(*self.students.get_children())
+        visible = [name for name in self.names if query in name.lower() or
+                   query in self.data.get(name, {}).get('display_name', '').lower() or
+                   query in self.data.get(name, {}).get('roll_number', '').lower()]
+        for index, name in enumerate(visible):
+            suffix = ' — metadata missing' if name not in self.data else ''
+            account = self.accounts[name]
+            status_tag = 'success'
+            if not account['exists']:
+                suffix = ' — Linux account missing'
+                status_tag = 'danger'
+            elif account.get('status') == 'disabled':
+                suffix += ' — disabled'
+                status_tag = 'warning'
+            self.students.insert('', 'end', iid=name, text=name + suffix,
+                                 tags=(status_tag, 'even' if index % 2 == 0 else 'odd'))
+        if current and self.students.exists(current[0]):
+            self.students.selection_set(current[0])
 
     def select_student(self, _event=None):
         if self.loading:
@@ -757,6 +951,8 @@ class Dashboard:
         name = self.selected
         item = self.student_lab_records[selection[0]]
         window = tk.Toplevel(self.root)
+        ui.install_theme(window)
+        ui.protect_popup(window, self.root)
         window.title(f"Submissions — {name} — {item['title']}")
         window.geometry('850x550')
         box = ttk.Frame(window, padding=16)
@@ -781,10 +977,13 @@ class Dashboard:
                     messagebox.showinfo('Submission', 'This problem is pending or has no readable submission.', parent=self.root)
                     return
                 viewer = tk.Toplevel(self.root)
+                ui.install_theme(viewer)
+                ui.protect_popup(viewer, self.root)
                 viewer.title(f'{name} — {item["id"]} — {question}')
                 viewer.geometry('900x650')
                 ttk.Label(viewer, text=f'{name} — {item["id"]} — {question}\nSubmitted: {response["submitted_at"]}').pack(anchor='w')
                 code = ScrolledText(viewer, wrap='none', font=('DejaVu Sans Mono', 11))
+                ui.code_widget(code)
                 code.pack(fill='both', expand=True)
                 record = response.get('record')
                 if record:
@@ -900,6 +1099,31 @@ class Dashboard:
         if self.dirty() and not messagebox.askyesno('Close dashboard', 'Discard unsaved academic changes?', parent=self.root):
             return
         self.root.destroy()
+
+    def switch_theme(self):
+        try:
+            mode = ui.toggle_theme(self.root)
+        except OSError:
+            messagebox.showerror('Appearance', 'The theme preference could not be saved.', parent=self.root)
+            return
+        self.theme_label.set(ui.theme_action(mode))
+
+    def logout(self):
+        if self.busy:
+            messagebox.showinfo('Operation in progress', 'Wait for the current operation to finish before logging out.', parent=self.root)
+            return
+        if self.dirty() and not messagebox.askyesno('Log out',
+                'Discard unsaved academic changes and return to the login screen?', parent=self.root):
+            return
+        if not self.dirty() and not messagebox.askyesno('Log out',
+                'End this session and return to the login screen?', parent=self.root):
+            return
+        try:
+            subprocess.Popen(['/usr/bin/xfce4-session-logout', '--logout'],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, close_fds=True)
+        except OSError:
+            messagebox.showerror('Log out', 'The XFCE logout service is unavailable.', parent=self.root)
 
 
 def main():

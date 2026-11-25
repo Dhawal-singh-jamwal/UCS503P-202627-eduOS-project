@@ -132,10 +132,12 @@ xfce4-goodies
 xorg-server
 xorg-xinit
 sddm
+qt5-declarative
 mesa
 network-manager-applet
 python
 tk
 gcc
+bubblewrap
 gdb
 git

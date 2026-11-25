@@ -1,6 +1,7 @@
 """Assignment/problem/projection/submission tests; no real account operations."""
 import contextlib
 import copy
+import inspect
 import json
 import os
 from pathlib import Path
@@ -333,6 +334,66 @@ class PrivateStorageTests(unittest.TestCase):
 
 
 class DashboardTests(unittest.TestCase):
+    def test_shared_modern_ui_is_included_and_both_apps_use_it(self):
+        profile = existing.PROFILE
+        shared = profile / 'airootfs/usr/share/eduos/eduos_ui.py'
+        self.assertTrue(shared.is_file())
+        theme = shared.read_text()
+        self.assertIn("style.configure('Primary.TButton'", theme)
+        self.assertIn("style.configure('Nav.TButton'", theme)
+        self.assertIn("style.configure('Treeview'", theme)
+        permissions = (profile / 'profiledef.sh').read_text()
+        self.assertIn('["/usr/share/eduos/eduos_ui.py"]="0:0:644"', permissions)
+        for executable in ('eduos-admin-app', 'eduos-student-app'):
+            source = (existing.BIN / executable).read_text()
+            self.assertIn('import eduos_ui as ui', source)
+            self.assertIn('ui.install_theme(', source)
+            self.assertIn('ui.toggle_theme(', source)
+
+    def test_theme_preference_is_atomic_validated_and_user_private(self):
+        ui = existing.app.ui
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'XDG_CONFIG_HOME': directory}):
+            ui.save_theme('dark')
+            self.assertEqual(ui.load_theme(), 'dark')
+            destination = Path(directory) / 'eduos/theme.json'
+            self.assertEqual(json.loads(destination.read_text()), {'mode': 'dark'})
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+            destination.write_text('{broken')
+            self.assertEqual(ui.load_theme(), 'light')
+            with self.assertRaises(ValueError):
+                ui.save_theme('sepia')
+
+    def test_fullscreen_controls_topmost_layer_and_popup_guard_exists(self):
+        ui = existing.app.ui
+        window = MagicMock()
+        values = {'-fullscreen': False, '-topmost': False}
+        def attributes(name, *setting):
+            if setting:
+                values[name] = setting[0]
+            return values[name]
+        window.attributes.side_effect = attributes
+        self.assertTrue(ui.set_fullscreen(window, True))
+        self.assertTrue(values['-fullscreen'])
+        self.assertTrue(values['-topmost'])
+        self.assertFalse(ui.toggle_fullscreen(window))
+        self.assertFalse(values['-fullscreen'])
+        self.assertFalse(values['-topmost'])
+        self.assertIn("window.bind('<Map>', reassert", inspect.getsource(ui.protect_popup))
+
+    def test_admin_uses_sidebar_overview_without_removing_page_controller(self):
+        source = (existing.BIN / 'eduos-admin-app').read_text()
+        self.assertIn("style='Navigation.TNotebook'", source)
+        self.assertIn("('Overview', overview_tab)", source)
+        self.assertIn("('Students', students_tab)", source)
+        self.assertIn("('Machines', machines_tab)", source)
+        self.assertIn("text='Search and select an account'", source)
+
+    def test_assessment_editor_has_master_detail_question_navigation(self):
+        source = (existing.PROFILE / 'airootfs/usr/share/eduos/eduos_edulab_admin.py').read_text()
+        self.assertIn('self.question_list = ttk.Treeview', source)
+        self.assertIn("self.question_list.bind('<<TreeviewSelect>>'", source)
+        self.assertIn("style='Navigation.TNotebook'", source)
+
     def test_admin_fullscreen_and_escape_without_exit(self):
         app = existing.app
         root = MagicMock()
@@ -342,7 +403,7 @@ class DashboardTests(unittest.TestCase):
                 state['fullscreen'] = value[0]
             return state['fullscreen']
         root.attributes.side_effect = attributes
-        with patch.object(app, 'tk', MagicMock()), patch.object(app, 'ttk', MagicMock()) as ttk, patch.object(app, 'ScrolledText', MagicMock()), patch.object(app.Dashboard, 'refresh'):
+        with patch.object(app, 'tk', MagicMock()), patch.object(app, 'ttk', MagicMock()) as ttk, patch.object(app, 'ScrolledText', MagicMock()), patch.object(app, 'EduLabPanel', MagicMock()), patch.object(app.Dashboard, 'refresh'):
             app.Dashboard(root)
             self.assertTrue(state['fullscreen'])
             callbacks = {c.args[0]: c.args[1] for c in root.bind.call_args_list}
@@ -353,10 +414,13 @@ class DashboardTests(unittest.TestCase):
             self.assertFalse(state['fullscreen'])
             root.destroy.assert_not_called()
             self.assertFalse(any('Task' in c.kwargs.get('text', '') for c in ttk.Label.call_args_list))
+            button_text = [c.kwargs.get('text') for c in ttk.Button.call_args_list]
+            self.assertNotIn('Open Machines', button_text)
+            self.assertIn('Log Out / Switch User', button_text)
 
     def test_student_fullscreen_no_tasks_no_file_controls(self):
         app = existing.student_app
-        with patch.object(app, 'tk', MagicMock()) as tk, patch.object(app, 'ttk', MagicMock()) as ttk, patch.object(labs, 'load_store', return_value=document()), patch.object(labs, 'assignment_progress', return_value=labs.progress(['Pending'] * 2)):
+        with patch.object(app, 'tk', MagicMock()) as tk, patch.object(app, 'ttk', MagicMock()) as ttk, patch.object(app, 'EduLabPanel', MagicMock()), patch.object(labs, 'load_store', return_value=document()), patch.object(labs, 'assignment_progress', return_value=labs.progress(['Pending'] * 2)):
             app.build_window('student1000', {'roll_number': '1000', 'display_name': 'Student', 'tasks': [{'title': 'legacy'}]})
             tk.Tk.return_value.attributes.assert_called_with('-fullscreen', True)
             texts = [c.kwargs.get('text', '') for c in ttk.Label.call_args_list + ttk.Button.call_args_list]
@@ -366,11 +430,52 @@ class DashboardTests(unittest.TestCase):
         for forbidden in ('Create Submission File', 'Save & Submit', 'filedialog', 'self.filename'):
             self.assertNotIn(forbidden, source)
 
+    def test_student_workflows_have_separate_expanding_tabs(self):
+        app = existing.student_app
+        frames = iter(MagicMock(name=f'frame{index}') for index in range(8))
+        with patch.object(app, 'tk', MagicMock()), patch.object(app, 'ttk', MagicMock()) as ttk, \
+                patch.object(app, 'LabAssignments', MagicMock()) as assignments, \
+                patch.object(app, 'EduLabPanel', MagicMock()) as edulab:
+            ttk.Frame.side_effect = lambda *_args, **_kwargs: next(frames)
+            window = app.build_window('student1000', {'roll_number': '1000',
+                                      'display_name': 'Student', 'tasks': []})
+            tabs = ttk.Notebook.return_value
+            self.assertEqual(tabs.pack.call_args.kwargs, {'fill': 'both', 'expand': True})
+            calls = tabs.add.call_args_list
+            self.assertEqual([call.kwargs['text'] for call in calls],
+                             ['Lab Assignments', 'EduLab Assessments'])
+            self.assertIs(assignments.call_args.args[0], calls[0].args[0])
+            self.assertIs(edulab.call_args.args[1], calls[1].args[0])
+            self.assertIs(window.student_tabs, tabs)
+            tabs.select.return_value = str(calls[1].args[0])
+            tabs.bind.call_args.args[1](None)
+            edulab.return_value.refresh.assert_called_once()
+
     def test_student_nonstudent_rejected_before_tk(self):
         app = existing.student_app
         with patch.object(app.pwd, 'getpwuid', return_value=existing.account('eduos')), patch.object(app, 'tk', MagicMock()) as tk:
             self.assertEqual(app.main(), 0)
             tk.Tk.assert_not_called()
+
+    def test_student_logout_uses_fixed_xfce_command(self):
+        app = existing.student_app
+        parent = MagicMock()
+        with patch.object(app.messagebox, 'askyesno', return_value=True, create=True), \
+                patch.object(app.subprocess, 'Popen') as process:
+            app.logout_session(parent)
+        self.assertEqual(process.call_args.args[0], ['/usr/bin/xfce4-session-logout', '--logout'])
+        self.assertNotIsInstance(process.call_args.args[0], str)
+
+    def test_admin_logout_uses_fixed_xfce_command(self):
+        app = existing.app
+        dashboard = object.__new__(app.Dashboard)
+        dashboard.root = MagicMock()
+        dashboard.busy = False
+        dashboard.data = dashboard.original = {}
+        with patch.object(app.messagebox, 'askyesno', return_value=True, create=True), \
+                patch.object(app.subprocess, 'Popen') as process:
+            dashboard.logout()
+        self.assertEqual(process.call_args.args[0], ['/usr/bin/xfce4-session-logout', '--logout'])
 
     def test_admin_code_view_is_read_only(self):
         app = existing.app

@@ -3,10 +3,12 @@
 import contextlib
 import copy
 import ast
+import hashlib
 import io
 import inspect
 import json
 from pathlib import Path
+import stat
 import tempfile
 import textwrap
 import types
@@ -19,6 +21,7 @@ import test_admin as existing
 helper = existing.helper
 machine = helper.machine
 PROFILE = existing.PROFILE / 'airootfs/usr/share/eduos/profiles/CSE-LAB-CPP-v1.json'
+ARCHIVE = existing.PROFILE / 'airootfs/usr/share/eduos/packages/pv-1.12.7-1-x86_64.pkg.tar.zst'
 
 
 def process(code=0, output=''):
@@ -36,10 +39,12 @@ class MachineTests(unittest.TestCase):
         (self.profiles / 'CSE-LAB-CPP-v1.json').write_text(json.dumps(self.profile))
         self.registration = self.root / 'machine.json'
         self.status = self.root / 'status.json'
+        self.fleet_file = self.root / 'fleet.json'
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         for key, path in [('ROOT', self.root), ('PROFILES', self.profiles),
-                          ('MACHINE', self.registration), ('STATUS', self.status)]:
+                          ('MACHINE', self.registration), ('STATUS', self.status),
+                          ('FLEET', self.fleet_file)]:
             self.stack.enter_context(patch.object(machine, key, path))
         self.stack.enter_context(patch.object(machine, 'secure_directory'))
         # The fixture directory is owned by the host user, not guest root.
@@ -74,12 +79,39 @@ class MachineTests(unittest.TestCase):
 
     def test_registration_is_valid_persistent_and_idempotent(self):
         first = self.register()
-        self.assertEqual(first['machine_id'], 'LAB-PC-001')
+        self.assertRegex(first['machine_id'], r'^LAB-PC-[A-F0-9]{16}$')
         raw = self.registration.read_bytes()
         with patch.object(machine.socket, 'gethostname', return_value='different-host'):
             self.assertEqual(machine.register(), first)
         self.assertEqual(self.registration.read_bytes(), raw)
         self.assertEqual(machine.load_machine(), first)
+
+    def test_fresh_state_disks_receive_distinct_ids(self):
+        with patch.object(machine.secrets, 'token_hex', side_effect=['1' * 16, '2' * 16]):
+            first = self.register()['machine_id']
+            self.registration.unlink()
+            second = self.register()['machine_id']
+        self.assertEqual((first, second), ('LAB-PC-' + '1' * 16, 'LAB-PC-' + '2' * 16))
+
+    def test_offline_fleet_snapshot_import_and_removal(self):
+        self.register()
+        with patch.object(machine, 'inspect_package', return_value='present'):
+            snapshot = machine.snapshot()
+        remote = copy.deepcopy(snapshot)
+        remote['machine']['machine_id'] = 'LAB-PC-ABCDEF1234567890'
+        remote['status']['machine_id'] = remote['machine']['machine_id']
+        records = machine.import_snapshot(remote)
+        self.assertIn(remote['machine']['machine_id'], records)
+        self.assertEqual(machine.fleet(), records)
+        self.assertEqual(self.fleet_file.stat().st_mode & 0o777, 0o600)
+        with self.assertRaises(machine.MachineError):
+            machine.import_snapshot(snapshot)
+        mismatch = copy.deepcopy(remote)
+        mismatch['status']['machine_id'] = 'LAB-PC-0000000000000000'
+        with self.assertRaises(machine.MachineError):
+            machine.import_snapshot(mismatch)
+        self.assertEqual(machine.remove_snapshot(remote['machine']['machine_id']), {})
+        self.assertEqual(machine.fleet(), {})
 
     def test_invalid_machine_id_and_document(self):
         self.register()
@@ -106,6 +138,24 @@ class MachineTests(unittest.TestCase):
         for name in ('--overwrite', 'foo;sh', '../foo', '$(id)'):
             with self.subTest(name=name), self.assertRaises(machine.MachineError):
                 machine.inspect_package(name)
+
+    def test_bundled_demo_package_integrity(self):
+        self.assertEqual(hashlib.sha256(ARCHIVE.read_bytes()).hexdigest(), machine.BUNDLED_PV_SHA256)
+        package = self.root / ARCHIVE.name
+        package.write_bytes(b'expected package')
+        trusted = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0,
+                                        st_size=package.stat().st_size)
+        with patch.object(machine, 'BUNDLED_PV', package), \
+             patch.object(machine, 'BUNDLED_PV_SHA256', hashlib.sha256(package.read_bytes()).hexdigest()), \
+             patch.object(machine.os, 'fstat', return_value=trusted):
+            self.assertEqual(machine.bundled_pv(), package)
+            package.write_bytes(b'changed package')
+            with self.assertRaisesRegex(machine.MachineError, 'integrity'):
+                machine.bundled_pv()
+            package.unlink()
+            package.symlink_to(ARCHIVE)
+            with self.assertRaisesRegex(machine.MachineError, 'unavailable'):
+                machine.bundled_pv()
 
     def test_service_state_detection(self):
         with patch.object(machine, 'run', side_effect=[process(0, 'enabled\n'), process(0, 'active\n')]):
@@ -159,15 +209,31 @@ class MachineTests(unittest.TestCase):
         def fake(command, timeout=20):
             calls.append(command)
             if command[1] == '-Qq':
-                return process(1 if command[-1] == 'pv' and len([x for x in calls if x[1] == '-S']) == 0 else 0,
+                return process(1 if command[-1] == 'pv' and len([x for x in calls if x[1] == '-U']) == 0 else 0,
                                command[-1] + '\n')
             return process()
-        with patch.object(machine, 'run', side_effect=fake):
+        with patch.object(machine, 'run', side_effect=fake), \
+             patch.object(machine, 'bundled_pv', return_value=machine.BUNDLED_PV):
             result = machine.sync()
         self.assertTrue(result['compliant'])
-        self.assertEqual([c for c in calls if c[1] == '-S'],
-                         [['/usr/bin/pacman', '-S', '--needed', '--noconfirm', '--', 'pv']])
+        self.assertEqual([c for c in calls if c[1] == '-U'],
+                         [['/usr/bin/pacman', '-U', '--noconfirm', '--', str(machine.BUNDLED_PV)]])
+        self.assertFalse(any(c[1] == '-S' for c in calls))
         self.assertFalse(any(c[1] in ('-R', '-Rns') for c in calls))
+
+    def test_other_missing_packages_still_use_repositories(self):
+        self.register()
+        self.profile['required_packages'] = ['gcc']
+        (self.profiles / 'CSE-LAB-CPP-v1.json').write_text(json.dumps(self.profile))
+        calls = []
+        def fake(command, timeout=20):
+            calls.append(command)
+            if command[1] == '-Qq':
+                return process(1 if not any(c[1] == '-S' for c in calls) else 0, 'gcc\n')
+            return process()
+        with patch.object(machine, 'run', side_effect=fake):
+            self.assertTrue(machine.sync()['compliant'])
+        self.assertIn(['/usr/bin/pacman', '-S', '--needed', '--noconfirm', '--', 'gcc'], calls)
 
     def test_sync_restores_required_service(self):
         self.register()
@@ -205,11 +271,18 @@ class MachineTests(unittest.TestCase):
     def test_demo_drift_removes_only_fixed_package(self):
         self.register()
         with patch.object(machine, 'inspect_package', return_value='present'), \
+             patch.object(machine, 'bundled_pv', return_value=machine.BUNDLED_PV), \
              patch.object(machine, 'run', return_value=process()) as run:
             self.assertIn('pv', machine.demo_drift()['message'])
         run.assert_called_once_with(['/usr/bin/pacman', '-R', '--noconfirm', '--', 'pv'], timeout=300)
         with patch.object(machine, 'inspect_package', return_value='missing'), \
              patch.object(machine, 'run') as run:
+            machine.demo_drift()
+        run.assert_not_called()
+        with patch.object(machine, 'inspect_package', return_value='present'), \
+             patch.object(machine, 'bundled_pv', side_effect=machine.MachineError('archive absent')), \
+             patch.object(machine, 'run') as run, \
+             self.assertRaisesRegex(machine.MachineError, 'archive absent'):
             machine.demo_drift()
         run.assert_not_called()
 
@@ -219,7 +292,7 @@ class MachineTests(unittest.TestCase):
              patch.object(machine, 'inspect_package', return_value='present'):
             result = helper.dispatch({'action': 'machine_check'})
         self.assertTrue(result['status']['compliant'])
-        self.assertEqual(result['machine']['machine_id'], 'LAB-PC-001')
+        self.assertRegex(result['machine']['machine_id'], r'^LAB-PC-[A-F0-9]{16}$')
         with patch.object(helper.os, 'getuid', return_value=0), \
              patch.object(helper.os, 'geteuid', return_value=0), \
              patch.object(helper.pwd, 'getpwuid', return_value=existing.account('student1000')), \
@@ -233,7 +306,7 @@ class MachineTests(unittest.TestCase):
              patch.object(machine, 'inspect_package', return_value='present'):
             response = helper.dispatch({'action': 'machine_check'})
         self.assertTrue(self.registration.exists())
-        self.assertEqual(response['machine']['machine_id'], 'LAB-PC-001')
+        self.assertRegex(response['machine']['machine_id'], r'^LAB-PC-[A-F0-9]{16}$')
 
     def test_boot_registration_precedes_account_restore(self):
         setup = (existing.BIN / 'eduos-setup').read_text()

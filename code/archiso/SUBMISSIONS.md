@@ -27,7 +27,7 @@ USER and XDG_DATA_HOME. The student API accepts only assignment ID, problem ID a
 source; it accepts no target username or filesystem path.
 
 ```text
-/home/student1000/.local/share/eduos/submissions/LAB-0001-Q1.json
+/var/lib/eduos/submissions/student1000/LAB-0001-Q1.json
 ```
 
 Example record (each test retains the evaluator's existing result fields):
@@ -71,12 +71,10 @@ there is no attempt history or separate source/result transaction. Source is
 preserved exactly. Records have a 2 MiB serialized limit and strict field/type,
 identity, timestamp and result validation.
 
-All directory traversal uses file descriptors and `O_NOFOLLOW`. The `/home`
-anchor must be root-owned and not writable by other users. The account's home
-must match `/home/<validated username>` and belong to that account. Home,
-`.local`, and `share` cannot be writable by other users. `eduos` and `submissions`
-are private 0700 directories; existing unsafe directories are rejected rather
-than silently changing permissions. Newly created parents are also 0700.
+All directory traversal uses file descriptors and `O_NOFOLLOW`. The root-owned
+`/var/lib/eduos/submissions` parent anchors each student's private 0700 directory.
+The authenticated Linux account must still have the expected `/home/<username>`
+identity. A student cannot choose another account or a filesystem path.
 
 Readers reject symlinks, hard links, foreign-owned files, group/world-accessible
 files, nonregular files and oversized/malformed JSON. Opens are nonblocking so
@@ -118,17 +116,15 @@ without sudo or the helper. Existing non-evaluator submissions remain readable.
 
 Submission JSON belongs to the student and can be edited or deleted by that
 student outside the GUI. Stored evaluation and timestamps are local coursework
-metadata, not tamper-proof grades. Native C++ execution retains the evaluator's
-existing limitations; this feature adds no sandbox, network restriction or grading.
+metadata, not tamper-proof grades. C++ execution uses the evaluator's Bubblewrap
+isolation; this storage feature does not add grading.
 Historical records are not retained. The admin viewer lists currently assigned
 problems; deleted/revoked problems are not exposed by the helper, although their
 files are not deleted.
 
-**Home persistence:** files survive logout and reopening the app, but this live
-ArchISO currently does not persist `/home` across VM reboot. The existing state
-disk persists `/var/lib/eduos`, including older non-evaluator submissions. This
-milestone does not change mounts, provisioning or copy home records into that
-state disk. Demonstrate the requested logout/login flow within the same VM boot.
+Evaluator submissions now persist with regular submissions on `EDUOS_STATE`.
+Files written by older ISO builds under `/home` are not migrated automatically;
+copy them before replacing the old live session if they must be retained.
 
 ## Checks, build and demo
 
@@ -136,7 +132,7 @@ state disk. Demonstrate the requested logout/login flow within the same VM boot.
 python3 -B -m unittest discover -s code/archiso/tests -v
 ```
 
-Tests use temporary fake student homes, mocked privileged account/ownership
+Tests use a temporary persistent-state tree, mocked privileged account/ownership
 boundaries, and harmless real C++ programs. Coverage includes fresh evaluation,
 pass/partial/compile-error saves, exact source/IDs/timestamps, replacement,
 atomic failure, permissions, traversal/symlink/hardlink/FIFO rejection, helper

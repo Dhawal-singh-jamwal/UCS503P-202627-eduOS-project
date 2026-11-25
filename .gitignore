@@ -468,3 +468,6 @@ TSWLatexianTemp*
 
 # Persistent EduOS VM data; never include in ISO output cleanup.
 /runtime/
+
+# Generated bootable images.
+*.iso

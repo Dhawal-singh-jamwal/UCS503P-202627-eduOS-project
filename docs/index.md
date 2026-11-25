@@ -1,40 +1,18 @@
-﻿![Tiet Logo](assets/tiet-logo.svg){ .tiet-logo }
+# EduOS
 
-**UCS503: Software Engineering (Project)**  
-**TIET Patiala**
+EduOS is an Arch Linux based live environment for programming laboratories.
+It provides student coursework, timed C++ assessments, an administrator
+dashboard, and local machine management. A separate `EDUOS_STATE` disk keeps
+managed data after reboot.
 
-# The Sum Function in C++
+Build the ISO from the repository root:
 
-**Author(s)**:
-
-`(RGB)` Raghav B. Venkataramaiyer `<bv.raghav -at-
-thapar -dot- edu>`
-
-This project creates a sum function in c++ as a sample
-to illustrate how to compile a shared library and
-distribute it for use along with the binary.
-
-## Installation
-
-``` shell
-make -C code
+```bash
+./scripts/create-eduos-state-disk.sh
+sudo mkarchiso -v -w "$(mktemp -d /tmp/eduos-build.XXXXXX)" \
+  -o "$PWD/out-admin" "$PWD/code/archiso/profile"
+./scripts/run-eduos.sh
 ```
 
-This will create create a folder `dist` in `code`
-folder, with following contents
-
-```
-dist
- +-lib
- |  \-libbvr_math.so
- +-bin
-    \-run
-```
-
-## Usage
-
-``` shell
-cd code
-export LD_LIBRARY_PATH=dist/lib
-./dist/bin/run
-```
+The repository `README.md` has the full build, backup, and restore guide.
+Feature and release checklists are in `code/archiso/`.

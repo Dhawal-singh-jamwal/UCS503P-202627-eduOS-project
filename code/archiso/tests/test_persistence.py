@@ -73,6 +73,8 @@ class PersistenceTests(unittest.TestCase):
                 self.hashes[name]['expire'] = command[command.index('--expiredate') + 1]
         elif operation == 'chage':
             for option, key in [('-d', 'last_change'), ('-m', 'min'), ('-M', 'max'), ('-W', 'warn'), ('-I', 'inactive'), ('-E', 'expire')]:
+                if option not in command:
+                    continue
                 value = command[command.index(option) + 1]
                 self.hashes[name][key] = '' if value == '-1' else value
 
@@ -116,6 +118,20 @@ class PersistenceTests(unittest.TestCase):
         # A second boot remains idempotent and retains IDs/hashes.
         self.reboot()
         self.assertEqual(self.hashes['student1005'], record['shadow'])
+
+    def test_recreate_previously_deleted_student_survives_reboot(self):
+        self.deleted.write_text(json.dumps({'students': ['student1001']}))
+        result = self.request('create', revision=helper.revision(self.data_path.read_bytes()),
+                              username='student1001', roll_number='1001',
+                              display_name='Recreated Student', password='NEVER-PERSIST-THIS')
+        self.assertIn('prior deletion marker was cleared', result['message'])
+        self.assertNotIn('student1001', helper.load_deleted()['students'])
+        record = helper.load_registry()['students']['student1001']
+        self.reboot()
+        self.assertEqual(self.users['student1001'].pw_uid, record['uid'])
+        self.assertEqual(self.hashes['student1001'], record['shadow'])
+        self.assertEqual(json.loads(self.data_path.read_text())['student1001']['display_name'],
+                         'Recreated Student')
 
     def test_password_reset_survives_reboot(self):
         self.request('reset_password', username='student1000', password='NEW-PASSWORD')
@@ -169,16 +185,49 @@ class PersistenceTests(unittest.TestCase):
             helper.restore_account('student1000', {'uid': 1001, 'gid': 1001, 'shadow': shadow()}, self.data)
         self.commands.assert_not_called()
 
+    def test_boot_restore_error_names_account_without_exposing_hash(self):
+        REAL_PERSIST()
+        with patch.object(helper, 'restore_account', side_effect=helper.RequestError('Linux operation chage failed (exit 1).')):
+            with patch.object(helper.os, 'getuid', return_value=0), patch.object(helper.os, 'geteuid', return_value=0):
+                with self.assertRaisesRegex(helper.RequestError, 'Could not restore student1000: Linux operation chage failed') as caught:
+                    helper.restore_state()
+        self.assertNotIn('$6$salt$hashed', str(caught.exception))
+
     def test_persistence_failure_reported_not_success(self):
         self.persist.side_effect = OSError('disk full')
         with self.assertRaisesRegex(helper.RequestError, 'PARTIAL FAILURE'):
             self.request('reset_password', username='student1000', password='SECRET')
+
+    def test_create_does_not_publish_metadata_without_account_snapshot(self):
+        self.persist.side_effect = OSError('disk full')
+        with self.assertRaisesRegex(helper.RequestError, 'PARTIAL FAILURE'):
+            self.create()
+        self.assertIn('student1005', self.users)  # Runtime mutation is reported for repair.
+        self.assertNotIn('student1005', json.loads(self.data_path.read_text()))
+        self.assertNotIn('student1005', helper.load_registry()['students'])
+
+    def test_account_creation_rejected_when_state_disk_is_not_mounted(self):
+        self.persistent_state.return_value = False
+        with self.assertRaisesRegex(helper.RequestError, 'EDUOS_STATE disk is not mounted'):
+            self.create()
+        self.assertNotIn('student1005', self.users)
+        self.commands.assert_not_called()
+        self.assertEqual(json.loads(self.data_path.read_text()), self.data)
 
     def test_hash_restore_uses_stdin_not_argv(self):
         helper.restore_account('student1000', {'uid': 1001, 'gid': 1001, 'shadow': shadow()}, self.data)
         call = next(c for c in self.commands.call_args_list if c.args[0][0].endswith('/chpasswd'))
         self.assertEqual(call.args[0], ['/usr/bin/chpasswd', '--encrypted'])
         self.assertIn('$6$salt$hashed', call.args[1])
+        aging = next(c.args[0] for c in self.commands.call_args_list if c.args[0][0].endswith('/chage'))
+        self.assertNotIn('-m', aging)
+
+    def test_unsupported_minimum_age_fails_before_linux_mutation(self):
+        record = {'uid': 1001, 'gid': 1001, 'shadow': shadow()}
+        record['shadow']['min'] = '7'
+        with self.assertRaisesRegex(helper.RequestError, 'minimum password age is unsupported'):
+            helper.restore_account('student1000', record, self.data)
+        self.commands.assert_not_called()
 
     def test_legacy_tasks_cannot_be_edited(self):
         changed = copy.deepcopy(self.data)
@@ -236,8 +285,10 @@ class HostScriptTests(unittest.TestCase):
     def test_boot_order_and_no_automatic_format(self):
         root = existing.PROFILE / 'airootfs'
         setup = (root / 'etc/systemd/system/eduos-setup.service').read_text()
+        display = (root / 'etc/systemd/system/display-manager.service.d/eduos.conf').read_text()
         mount = (root / 'usr/local/bin/eduos-state-mount').read_text()
         self.assertIn('Requires=eduos-state.service', setup)
+        self.assertIn('After=eduos-setup.service', display)
         self.assertIn('/dev/disk/by-label/EDUOS_STATE', mount)
         self.assertNotIn('mkfs', mount)
         self.assertIn('EPHEMERAL', mount)

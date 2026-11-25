@@ -1,5 +1,25 @@
 # EduOS persistent state and Lab Assignments
 
+## Interface
+
+The dashboard uses a shared EduOS desktop theme with a persistent left-hand
+navigation rail, an overview page, card-based summaries, searchable student
+records, status-coloured tables, and consistent primary/destructive actions.
+The navigation pages continue to use the existing internal notebook controller,
+so switching pages retains the established refresh and permission behaviour.
+
+The student portal uses the same visual system while keeping normal Lab
+Assignments and timed EduLab Assessments in separate, expanding tabs. Code and
+evaluation output use a high-contrast monospace editor palette. This module is
+presentation-only: helper requests, evaluator execution, persistence, and data
+schemas are unchanged.
+
+Both dashboards provide a Light/Dark Mode action. The preference is stored
+atomically as `~/.config/eduos/theme.json` with user-only permissions. While a
+dashboard is fullscreen it also stays above the XFCE panel, and custom editor or
+result popups are protected transients above that dashboard. Leaving fullscreen
+removes the topmost state so the normal desktop and panel remain available.
+
 EduOS still boots an immutable ArchISO into SDDM and XFCE X11. Both dashboards
 retain fullscreen startup, F11 toggle and Escape to leave fullscreen. The admin
 has Exit Dashboard and its existing personal menu launcher. Neither GUI runs as
@@ -41,7 +61,11 @@ Writing to an ISO path did not make those changes part of the ISO.
 looks only for `/dev/disk/by-label/EDUOS_STATE`, and mounts ext4 at
 `/var/lib/eduos` with `nodev,nosuid,noexec`. It never formats a guest disk.
 If the label is absent it logs an explicit EPHEMERAL warning and provisioning
-continues on the temporary filesystem. If a labeled disk exists but mounting
+continues on the temporary filesystem for read-only/demo use. The admin helper
+refuses account creation, deletion, profile saves, password resets and account
+state changes in this mode, so it cannot report a change as permanent when the
+state would disappear at reboot. The dashboard also displays a persistent-state
+warning. If a labeled disk exists but mounting
 fails, setup fails rather than quietly creating a second, temporary dataset.
 
 ```text
@@ -55,6 +79,7 @@ fails, setup fails rather than quietly creating a second, temporary dataset.
     student1000/                      student1000-owned, 0700
       assignments.json                student1000-owned, 0600
   submissions/                        root-owned, 0755
+    student1000/LAB-0001-Q1.json       student1000-owned, 0600 (evaluated C++)
     student1000/                      student1000-owned, 0700
       LAB-0001/Q1/                    student1000-owned, 0700
         source.cpp                    student1000-owned, 0600
@@ -121,8 +146,11 @@ lists, and the exact per-student submission and view trees under
 `/var/lib/eduos`. An assignment with no remaining recipients is removed;
 shared assignments stay assigned to the other students. Every JSON update
 uses the existing lock and atomic writer. If cleanup fails, the marker blocks
-re-creation at reboot and the admin can refresh and retry deletion. Deleted
-IDs cannot be reused through Create Student; choose a new student ID.
+re-creation at reboot and the admin can refresh and retry deletion. The marker
+prevents automatic bootstrap recreation, but a later explicit Create Student
+operation may reuse the validated ID. In that case the helper durably clears
+the marker before creating the replacement account, then persists its new
+UID/GID, password hash and metadata normally. Deleted files are not recovered.
 
 For an orphaned record, a stale `/home/<username>` is removed only when its
 directory is not a symlink or mount and its owner matches the UID retained in
@@ -218,7 +246,7 @@ The sudoers policy is unchanged; the GUI remains an ordinary `eduos` process.
 C++ problems can now enable the [EduOS Evaluator](EVALUATOR.md) with exactly two
 visible test cases. Evaluation runs unprivileged in the student session; it does
 not use this helper or update grading/marks. Explicit Submit Code saves a fresh
-evaluation privately in the student home; this helper reads those records through
+evaluation privately on the state disk; this helper reads those records through
 the same restricted viewing operations. See [SUBMISSIONS.md](SUBMISSIONS.md).
 
 ## Validation and VM acceptance
@@ -247,5 +275,5 @@ not certify the final XFCE layout or full guest boot/shutdown lifecycle.
 
 The existing View Submissions window now shows evaluator scores and timestamps.
 View Code includes compilation results, test statuses and source. See
-[SUBMISSIONS.md](SUBMISSIONS.md) for home storage, security checks, logout/login
-persistence limits, build commands and the complete demo.
+[SUBMISSIONS.md](SUBMISSIONS.md) for persistent storage, security checks,
+build commands and the complete demo.

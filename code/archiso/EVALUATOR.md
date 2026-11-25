@@ -4,7 +4,7 @@ The evaluator compiles C++17 locally and runs exactly two visible test cases.
 It does not add a server, container infrastructure, grading, history or submission
 storage by itself. Run Tests results remain transient. The subsequent
 [local submission feature](SUBMISSIONS.md) adds explicit Submit Code with a fresh
-evaluation and private home-directory storage.
+evaluation and private persistent-state storage.
 
 ## Compatibility with the actual repository
 
@@ -76,9 +76,9 @@ Each evaluation:
 1. Reject root/elevated UID execution, malformed tests and empty/oversized source
    (maximum 128 KiB UTF-8).
 2. Create a private `eduos-evaluator-*` temporary directory explicitly in `/tmp`.
-3. Write `solution.cpp`; compile with `/usr/bin/g++ solution.cpp -std=c++17 -O2 -o solution`.
+3. Write `solution.cpp`; compile with `/usr/bin/g++ solution.cpp -std=c++17 -O2 -o solution` inside Bubblewrap.
 4. Bound compilation to 20 seconds and 64 KiB per output stream.
-5. Run the binary twice, with separate fresh test working directories and stdin
+5. Run the binary twice inside Bubblewrap, with separate fresh test working directories and stdin
    from each case. Each test has a two-second wall-clock timeout.
 6. Drain stdout/stderr incrementally, keeping at most 64 KiB of each. Exceeding
    either limit immediately terminates the process group. All launches use argv
@@ -107,21 +107,21 @@ stores the fresh evaluation explicitly and contributes to submitted counts; see
 
 ## Safety boundary
 
-This is NOT production-grade sandboxing and is NOT secure against deliberately
-malicious native C++ programs. Code runs with the logged-in student's privileges.
-There are no namespaces, containers, seccomp, network restrictions or comprehensive
-CPU/memory/disk/process quotas. A program can access that student's files and
-network, create files outside the temporary directory, or deliberately escape a
-process group. Captured output is bounded; arbitrary program-created files and
-core dumps are not governed by that output cap. Temporary working directories
-provide cleanup and ordinary test separation, not security isolation. Uncatchable
-termination or a machine crash can interrupt cleanup. Use normal coursework code
-on the demonstration VM. Stronger isolation is a future milestone.
+Compilation and execution now require Bubblewrap. It exposes `/usr` and `/etc`
+read-only, a private `/tmp`, and only the current scratch directory as writable;
+the student's home and EduOS state are not mounted. `--unshare-all` removes host
+network access and separates the process namespace. `prlimit` caps address space,
+file size, open files, CPU time, and new processes. Missing or failed isolation
+stops evaluation. The EduLab service also changes to a dedicated non-root UID
+before invoking the evaluator. This is stronger isolation, but it has not been
+security audited as an adversarial exam sandbox; kernel vulnerabilities and
+resource exhaustion outside these limits remain possible.
 
 The evaluator never uses sudo or the admin helper. The submission feature extends
 the helper only to read validated saved records; see [SUBMISSIONS.md](SUBMISSIONS.md).
 The sudoers rule, account provisioning, desktop/login configuration and persistence
-mount behavior are unchanged. `gcc` is the only added package; Python and Tk were
+mount behavior are unchanged. The ISO includes `gcc`, `bubblewrap`, and `prlimit`
+(from util-linux); Python and Tk were
 already in the profile. The evaluator needs an executable `/tmp` filesystem.
 
 ## Validation
@@ -143,7 +143,7 @@ callback tests use mocks; they do not replace a visual VM acceptance test.
 
 Use these commands in the same Bash session. A newly allocated build directory
 avoids stale mkarchiso state and preserves earlier images and persistent data.
-The profile retains its existing `archlinux-*.iso` filename convention.
+The profile produces an `eduos-*.iso` filename.
 
 ```bash
 cd /home/Dhawal/eduOS-project

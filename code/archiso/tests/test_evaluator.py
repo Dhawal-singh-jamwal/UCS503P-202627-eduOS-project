@@ -137,6 +137,18 @@ class ExecutionTests(unittest.TestCase):
         cases = [{'input': '', 'expected_output': '0'}] * 2
         self.assertTrue(all(t['passed'] for t in self.evaluate(source, cases)['tests']))
 
+    def test_isolation_hides_student_data_and_unshares_network(self):
+        source = ('#include <iostream>\n#include <filesystem>\n'
+                  'int main(){std::cout<<std::filesystem::exists("/home")<<" "'
+                  '<<std::filesystem::exists("/var/lib/eduos");}')
+        cases = [{'input': '', 'expected_output': '0 0'}] * 2
+        result = self.evaluate(source, cases)
+        self.assertTrue(result['compile_success'])
+        self.assertEqual([case['actual'] for case in result['tests']], ['0 0'] * 2)
+        command = evaluator.isolated_command(['/usr/bin/g++', 'solution.cpp'], Path('/tmp'), 20)
+        self.assertIn('--unshare-all', command)
+        self.assertNotIn('--share-net', command)
+
 
 class IntegrationTests(unittest.TestCase):
     setUp = assignment_tests.HelperAssignmentTests.setUp

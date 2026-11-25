@@ -1,10 +1,10 @@
 # Local EduOS machine management proof of concept
 
-The machine layer is local to one EduOS installation. It does not contact a
-server. The root-owned profile JSON in `/usr/share/eduos/profiles/` is the
-desired state. The persistent root-owned state disk stores `machine.json` and
-`status.json` in `/var/lib/eduos/`. A rebuilt ISO reuses the same machine ID
-when booted with the same `EDUOS_STATE` disk.
+The machine layer checks and synchronizes the local EduOS installation. It does
+not contact a server. The root-owned profile JSON in `/usr/share/eduos/profiles/`
+is the desired state. The persistent state disk stores `machine.json`,
+`status.json`, and imported `fleet.json` in `/var/lib/eduos/`. A rebuilt ISO
+reuses the same machine ID when booted with the same `EDUOS_STATE` disk.
 
 ## Format
 
@@ -18,10 +18,10 @@ are not enforced yet. Version 2 can be a separate validated JSON file with
 its own ID and explicit assignment.
 
 The registration has exactly `machine_id`, `hostname`, `assigned_profile`,
-and `registered: true`. First boot creates `LAB-PC-001`, reads the hostname,
-and assigns `CSE-LAB-CPP-v1`. Existing valid registration is preserved.
-The machine ID is a fixed first-machine prototype ID, so use a separate
-state disk before using more than one VM.
+and `registered: true`. First boot creates a random `LAB-PC-` plus 16 hexadecimal
+digits ID, reads the hostname, and assigns `CSE-LAB-CPP-v1`. Existing valid
+registrations, including older `LAB-PC-001` records, are preserved. Use a fresh
+state disk for each PC; cloning a state disk also clones its identity.
 
 The latest status has `checked_at` (UTC ISO 8601), `machine_id`, `profile_id`,
 `profile_version`, `compliant`, `packages` (`name`, `state`), `services`
@@ -36,10 +36,11 @@ cached status. `eduos-agent check` runs `pacman -Qq -- NAME` and
 `systemctl is-enabled/is-active -- UNIT` for every validated requirement,
 then prints structured JSON. It works without root and returns exit 1 for
 drift. `eduos-agent sync` requires root, installs only missing packages with
-`pacman -S --needed --noconfirm -- NAME`, enables/starts only required services,
-and checks again. `eduos-agent register` is root-only and is used during setup.
-No packages are removed. Package installation needs a reachable Arch mirror
-or a usable local package cache.
+`pacman -S --needed --noconfirm -- NAME`, except that the fixed `pv` demo package
+is restored from the ISO's pinned archive with `pacman -U`. It enables/starts
+only required services and checks again. `eduos-agent register` is root-only
+and is used during setup. No packages are removed by sync. Other missing
+packages still need a reachable Arch mirror and package database.
 
 The graphical dashboard remains unprivileged. Its Machines tab uses only the
 existing fixed `sudo -n /usr/local/bin/eduos-admin-helper` rule. The helper
@@ -51,6 +52,23 @@ existing lock serializes machine changes with other admin operations.
 Students cannot use that sudo rule. Profiles and state files are root-owned;
 all writes use atomic replacement.
 
+## Offline fleet overview
+
+The Machines tab can export a fresh local status snapshot as JSON and import
+snapshots from other EduOS PCs. `eduos-agent export` prints the same snapshot for
+USB or other manual transfer. Each snapshot contains schema version, machine
+registration, and a freshly checked status; it contains no student data.
+Imported snapshots are validated, size-limited to 64 KiB, stored under
+`fleet.json` with root-only permissions, and shown as **unverified** in the
+administrator view. Reimporting an ID replaces its previous snapshot. The
+dashboard can remove an imported PC; it never runs synchronization against a
+remote PC. A snapshot may be stale or forged by whoever supplied the file, so
+the overview is for inventory and demonstration, not trusted remote compliance.
+
+The local administrator can transfer a snapshot from each PC, then choose
+**Machines → Import PC Status**. Each PC needs its own state disk for a unique
+identity. Rebuilding the ISO preserves the ID on an existing disk.
+
 ## Safe drift demonstration
 
 The profile requires `gcc`, `gdb`, `git`, and `pv`. `gdb` and `git` are now
@@ -60,11 +78,15 @@ Python/Tk, pacman, or the C++ evaluator. Arch's package page lists `glibc`
 as its only dependency and `mkinitcpio-archiso` as an optional consumer:
 <https://archlinux.org/packages/extra/x86_64/pv/>. Plain `pacman -R pv` will
 refuse removal if another installed package requires it; never force removal
-or use recursive removal options.
+or use recursive removal options. The ISO carries the signed
+`pv-1.12.7-1-x86_64.pkg.tar.zst` archive under `/usr/share/eduos/packages/`.
+The agent checks its pinned SHA-256 digest before removing or reinstalling
+`pv`. This avoids the empty pacman sync database in a fresh Arch ISO and lets
+the demo work offline on every boot.
 
 1. Boot the rebuilt ISO with its writable state disk, log in as `eduos`,
    open Admin Dashboard → Machines, and press **Refresh Status**. It should
-   show `LAB-PC-001`, `CSE-LAB-CPP-v1`, and **COMPLIANT**.
+   show a `LAB-PC-...` ID, `CSE-LAB-CPP-v1`, and **COMPLIANT**.
 2. In an `eduos` terminal, run the following fixed helper request. It removes
    only `pv` with normal pacman dependency checks; no package name is accepted
    from stdin. Do not use `-Rdd`, `-Rs`, or remove any other profile package.
@@ -74,8 +96,8 @@ or use recursive removal options.
    ```
 3. Press **Refresh Status**. It should show **DRIFT DETECTED** and `pv MISSING`.
 4. Press **Synchronize** and confirm. The helper reinstalls `pv` from the
-   configured Arch mirror/cache and rechecks. Press **Refresh Status** again
-   to show **COMPLIANT**.
+   bundled archive and rechecks. Press **Refresh Status** again to show
+   **COMPLIANT**. No `pacman -Sy` step is needed.
 
 ## Build and run
 
@@ -98,14 +120,15 @@ qemu-system-x86_64 -enable-kvm -m 4096 -smp 4 -boot order=d \
 
 The live ISO root filesystem is temporary. Removing `pv` is a drift demo for
 the current boot; rebooting restores the ISO's package set. Registration and
-last status persist on the state disk. Sync uses the local Arch package
-database and configured mirrors; an unavailable mirror causes a reported
-sync error. There is no timer and no automatic repair in this prototype.
+last status persist on the state disk. Sync restores `pv` from the ISO without
+network access; other required packages use the configured mirrors and may
+report a sync error if unavailable. There is no timer or automatic repair in
+this prototype.
 
 ## Confirm the running build
 
-The dashboard subtitle and `/usr/share/eduos/build-info.txt` should both include
-`machine-management-v2`. The runner prints the ISO it is about to boot. From
+The dashboard subtitle and `/usr/share/eduos/build-info.txt` should include
+`machine-offline-pv-v1`. The runner prints the ISO it is about to boot. From
 the project root, its default selection can be checked before starting QEMU:
 
 ```sh
