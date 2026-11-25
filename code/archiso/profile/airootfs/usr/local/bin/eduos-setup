@@ -1,0 +1,34 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# Keep a fallback account available for administration and non-student access.
+if ! /usr/bin/id eduos >/dev/null 2>&1; then
+  /usr/bin/useradd \
+    --create-home \
+    --groups wheel \
+    --shell /bin/bash \
+    eduos
+else
+  /usr/bin/usermod \
+    --append \
+    --groups wheel \
+    --shell /bin/bash \
+    eduos
+fi
+
+printf '%s:%s\n' "eduos" "eduos" | /usr/bin/chpasswd
+
+# Separate non-login identity for evaluating untrusted assessment code.
+if ! /usr/bin/id edulab-runner >/dev/null 2>&1; then
+  /usr/bin/useradd --system --no-create-home --shell /usr/bin/nologin edulab-runner
+fi
+
+# Register independently of student restoration. A damaged account registry
+# must not prevent the machine identity from being created and displayed.
+if ! /usr/local/bin/eduos-agent register; then
+  echo 'WARNING: EduOS machine registration needs administrator repair.' >&2
+fi
+
+# Restore persistent student identities/password hashes before SDDM starts.
+/usr/local/bin/eduos-state-restore

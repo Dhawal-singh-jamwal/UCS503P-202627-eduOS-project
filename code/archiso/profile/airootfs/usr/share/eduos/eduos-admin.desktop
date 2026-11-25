@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=EduOS Admin Dashboard
+Comment=Manage student accounts and academic tasks
+Exec=/usr/local/bin/eduos-admin-app
+TryExec=/usr/local/bin/eduos-admin-app
+Icon=system-users
+Terminal=false
+Categories=Education;
+OnlyShowIn=XFCE;
+StartupNotify=false

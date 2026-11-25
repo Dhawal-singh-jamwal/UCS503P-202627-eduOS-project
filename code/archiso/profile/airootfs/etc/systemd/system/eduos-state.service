@@ -1,0 +1,10 @@
+[Unit]
+Description=Mount the persistent EduOS state disk (or warn about ephemeral mode)
+After=local-fs.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=eduos-setup.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/eduos-state-mount
+RemainAfterExit=yes

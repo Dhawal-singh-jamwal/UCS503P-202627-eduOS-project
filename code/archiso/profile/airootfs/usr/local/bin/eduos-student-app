@@ -1,0 +1,511 @@
+#!/usr/bin/env python3
+
+import json
+import os
+import pwd
+import re
+import queue
+import threading
+import subprocess
+import sys
+import tkinter as tk
+from pathlib import Path
+from tkinter import messagebox, ttk
+from tkinter.scrolledtext import ScrolledText
+
+sys.path.insert(0, '/usr/share/eduos')
+import eduos_assignments as labs
+import eduos_evaluator as evaluator
+import eduos_submissions as submissions
+from eduos_edulab_ui import EduLabPanel, restore_lockdown
+import eduos_ui as ui
+
+
+DATA_FILE = Path("/var/lib/eduos/student-data.json")
+WALLPAPER_FILE = "/usr/share/eduos/eduos-wallpaper.svg"
+
+
+def logout_session(parent):
+    if not messagebox.askyesno('Log out', 'End this session and return to the login screen?', parent=parent):
+        return
+    try:
+        subprocess.Popen(['/usr/bin/xfce4-session-logout', '--logout'],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, close_fds=True)
+    except OSError:
+        messagebox.showerror('Log out', 'The XFCE logout service is unavailable.', parent=parent)
+
+
+def load_student_data(username):
+    with DATA_FILE.open(encoding="utf-8") as data_file:
+        students = json.load(data_file)
+
+    if not isinstance(students, dict):
+        raise ValueError("EduOS student data must be a JSON object.")
+
+    if username not in students:
+        return None
+
+    student = students[username]
+    if not isinstance(student, dict):
+        raise ValueError(f"Student data for '{username}' must be an object.")
+
+    required_fields = {"roll_number", "display_name", "tasks"}
+    if not required_fields.issubset(student):
+        raise ValueError(f"Student data for '{username}' is missing required fields.")
+
+    if not isinstance(student["tasks"], list):
+        raise ValueError(f"Student tasks for '{username}' must be a list.")
+
+    for task in student["tasks"]:
+        if not isinstance(task, dict) or not {"title", "status", "due"}.issubset(task):
+            raise ValueError(f"Student task data for '{username}' is invalid.")
+
+    return student
+
+
+def set_xfconf(channel, property_name, value, value_type):
+    subprocess.run(
+        [
+            "/usr/bin/xfconf-query",
+            "--channel",
+            channel,
+            "--property",
+            property_name,
+            "--create",
+            "--type",
+            value_type,
+            "--set",
+            value,
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def configure_student_desktop():
+    """Apply the student-only XFCE shell presentation."""
+    panel_list = subprocess.run(
+        [
+            "/usr/bin/xfconf-query",
+            "--channel",
+            "xfce4-panel",
+            "--property",
+            "/panels",
+            "--list",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    panel_paths = re.findall(r"^/panels/[^/]+$", panel_list.stdout, re.MULTILINE)
+    for panel_path in panel_paths:
+        set_xfconf("xfce4-panel", f"{panel_path}/autohide", "true", "bool")
+
+    if not panel_paths:
+        set_xfconf("xfce4-panel", "/panels/panel-1/autohide", "true", "bool")
+
+    set_xfconf("xfce4-desktop", "/desktop-icons/style", "0", "int")
+
+    backdrop_list = subprocess.run(
+        [
+            "/usr/bin/xfconf-query",
+            "--channel",
+            "xfce4-desktop",
+            "--property",
+            "/backdrop",
+            "--list",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    wallpaper_paths = [
+        path
+        for path in backdrop_list.stdout.splitlines()
+        if path.endswith("/last-image")
+    ]
+    if not wallpaper_paths:
+        wallpaper_paths = [
+            "/backdrop/screen0/monitor0/workspace0/last-image"
+        ]
+    for wallpaper_path in wallpaper_paths:
+        set_xfconf("xfce4-desktop", wallpaper_path, WALLPAPER_FILE, "string")
+
+
+STARTER_CPP = '''#include <bits/stdc++.h>
+using namespace std;
+
+int main() {
+    // Write your code here
+
+    return 0;
+}
+'''
+
+
+def evaluation_text(result):
+    if result.get('error'):
+        return 'Evaluation unavailable\n\n' + result['error']
+    if not result['compile_success']:
+        return 'Compilation Failed\n\n' + result['compile_error'] + '\n\nNo test cases were executed.'
+    lines = ['Evaluation Results']
+    for index, case in enumerate(result['tests'], 1):
+        lines.append(f"\nTest Case {index}: {case['status']}\n\nInput:\n{case['input']}\n"
+                     f"Expected:\n{case['expected']}\nActual:\n{case['actual']}")
+        if case['error']:
+            lines.append('Diagnostics:\n' + case['error'][:4096])
+    lines.append(f"\nOverall: {sum(case['passed'] for case in result['tests'])} / {len(result['tests'])} passed")
+    return '\n'.join(lines)
+
+
+class EvaluatorWorkspace(tk.Toplevel):
+    """Draft editor with explicit submission; worker never accesses Tk widgets."""
+    def __init__(self, parent, problem, drafts, key, due=''):
+        super().__init__(parent)
+        ui.install_theme(self)
+        ui.protect_popup(self, parent)
+        self.title('EduOS Evaluator — ' + problem['title'])
+        self.geometry('950x720')
+        ui.set_fullscreen(self, parent.attributes('-fullscreen'))
+        self.bind('<F11>', lambda _event: ui.toggle_fullscreen(self))
+        self.bind('<Escape>', lambda _event: ui.set_fullscreen(self, False))
+        self.problem, self.drafts, self.key = problem, drafts, key
+        self.running = False
+        self.results = queue.Queue()
+        self.protocol('WM_DELETE_WINDOW', self.close)
+        ui.install_theme(self)
+        outer = ttk.Frame(self, padding=24)
+        outer.pack(fill='both', expand=True)
+        ttk.Label(outer, text=problem['title'], style='Title.TLabel', wraplength=850).pack(anchor='w')
+        ttk.Label(outer, text=f"C++17 • {problem.get('status', 'Assigned')} • Due: {due or 'Not specified'}",
+                  style='Subtitle.TLabel').pack(anchor='w')
+        controls = ttk.Frame(outer)
+        controls.pack(side='bottom', fill='x', pady=8)
+        self.submission_status = tk.StringVar(value='Not Submitted')
+        ttk.Label(outer, textvariable=self.submission_status, style='Subtitle.TLabel', wraplength=850).pack(side='bottom', anchor='w')
+        self.submit_button = ttk.Button(controls, text='Submit Code', style='Primary.TButton',
+                                        command=lambda: self.run_tests(submit=True))
+        self.submit_button.pack(side='right', padx=8)
+        self.run_button = ttk.Button(controls, text='Run Tests', command=self.run_tests)
+        self.run_button.pack(side='right')
+        ttk.Button(controls, text='Back to Lab', command=self.close).pack(side='left')
+        panes = ttk.Panedwindow(outer, orient='vertical')
+        panes.pack(fill='both', expand=True)
+        statement, editor, results = (ttk.Frame(panes) for _ in range(3))
+        for page, weight in ((statement, 1), (editor, 3), (results, 2)):
+            panes.add(page, weight=weight)
+        text = ScrolledText(statement, height=3, wrap='word', relief='flat', borderwidth=0,
+                            padx=12, pady=10, background='#ffffff', foreground=ui.TEXT)
+        text.pack(fill='both', expand=True)
+        text.insert('1.0', problem['problem_statement'])
+        text.configure(state='disabled')
+        ttk.Label(editor, text='C++ Code Editor', style='Subtitle.TLabel').pack(anchor='w')
+        self.code = ScrolledText(editor, height=10, wrap='none', undo=True)
+        ui.code_widget(self.code)
+        self.code.pack(fill='both', expand=True)
+        saved = submissions.read_own(*key)
+        self.code.insert('1.0', drafts.get(key, saved.get('code', STARTER_CPP)))
+        if saved.get('record'):
+            self.show_submission(saved['record'])
+        elif saved.get('warning'):
+            self.submission_status.set(saved['warning'])
+        self.output = ScrolledText(results, height=8, wrap='word')
+        ui.code_widget(self.output)
+        self.output.pack(fill='both', expand=True)
+        self.display('\n\n'.join(f"Test Case {i}\nInput:\n{c['input']}\nExpected:\n{c['expected_output']}"
+                                 for i, c in enumerate(problem['test_cases'], 1)))
+        ui.refresh_classic_widgets(self)
+
+    def display(self, text):
+        self.output.configure(state='normal')
+        self.output.delete('1.0', 'end')
+        self.output.insert('1.0', text)
+        self.output.configure(state='disabled')
+
+    def show_submission(self, record, successful=False):
+        heading = 'Submission successful' if successful else 'Submitted'
+        self.submission_status.set(f"{heading} — Last submitted: {record['submitted_at']}\nResult: {submissions.summary(record)}")
+
+    def run_tests(self, submit=False):
+        if self.running:
+            return
+        source = self.code.get('1.0', 'end-1c')
+        self.drafts[self.key] = source
+        self.running = True
+        self.submitting = submit
+        self.submit_button.configure(state='disabled', text='Submitting...' if submit else 'Submit Code')
+        if submit:
+            self.submission_status.set('Submitting...')
+        self.run_button.configure(state='disabled', text='Running...')
+        self.display('Compiling and running two test cases...')
+        cases = self.problem['test_cases']
+        def worker():
+            try:
+                if submit:
+                    record = submissions.submit(*self.key, source)
+                    result = {**record['evaluation'], '_submission': record}
+                else:
+                    result = evaluator.evaluate_cpp(source, cases)
+            except Exception as error:
+                message = str(error) if isinstance(error, (OSError, ValueError)) else 'The operation could not complete. Try again.'
+                result = {'error': message}
+            self.results.put(result)
+        # Non-daemon: even if the root window closes, bounded work finishes cleanup.
+        threading.Thread(target=worker).start()
+        self.after(100, self.poll)
+
+    def poll(self):
+        try:
+            result = self.results.get_nowait()
+        except queue.Empty:
+            self.after(100, self.poll)
+            return
+        self.running = False
+        self.run_button.configure(state='normal', text='Run Tests')
+        self.submit_button.configure(state='normal', text='Submit Code')
+        if self.submitting:
+            if result.get('_submission'):
+                self.show_submission(result['_submission'], successful=True)
+            else:
+                self.submission_status.set('Submission failed: ' + result.get('error', 'Could not save submission.'))
+        self.display(evaluation_text(result))
+
+    def close(self):
+        if self.running:
+            messagebox.showinfo('EduOS Evaluator', 'Please wait for the bounded evaluation to finish.', parent=self)
+            return
+        self.drafts[self.key] = self.code.get('1.0', 'end-1c')
+        self.destroy()
+
+
+class LabAssignments:
+    def __init__(self, parent, username):
+        self.parent = parent
+        self.username = username
+        self.drafts = {}
+        self.evaluator_window = None
+        self.show_dashboard()
+
+    def clear(self):
+        for child in self.parent.winfo_children():
+            child.destroy()
+
+    def show_dashboard(self):
+        self.clear()
+        heading = ttk.Frame(self.parent)
+        heading.pack(fill='x', pady=(0, 14))
+        ttk.Label(heading, text='Lab Assignments', style='PageTitle.TLabel').pack(side='left')
+        ttk.Button(heading, text='Refresh Assignments', command=self.show_dashboard).pack(side='right')
+        canvas = tk.Canvas(self.parent, bg=ui.BACKGROUND, highlightthickness=0)
+        bar = ttk.Scrollbar(self.parent, command=canvas.yview)
+        bar.pack(side='right', fill='y')
+        canvas.pack(side='left', fill='both', expand=True)
+        canvas.configure(yscrollcommand=bar.set)
+        cards = ttk.Frame(canvas)
+        item = canvas.create_window((0, 0), window=cards, anchor='nw')
+        cards.bind('<Configure>', lambda _e: canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.bind('<Configure>', lambda e: canvas.itemconfigure(item, width=e.width))
+        try:
+            assignments = labs.for_student(labs.load_store(), self.username)
+        except (OSError, ValueError) as error:
+            ttk.Label(cards, text=f'Assignments unavailable: {error}', style='Subtitle.TLabel', wraplength=600).pack(pady=16)
+            return
+        if not assignments:
+            ttk.Label(cards, text='No lab assignments currently assigned.', style='Subtitle.TLabel').pack(pady=16)
+        for assignment in assignments:
+            card = ttk.Frame(cards, style='Card.TFrame', padding=20)
+            card.pack(fill='x', pady=(0, 10), padx=(0, 8))
+            ttk.Label(card, text=assignment['title'], style='CardTitle.TLabel', wraplength=650).pack(anchor='w')
+            progress = labs.assignment_progress(assignment)
+            info = (f"{assignment['id']}  ·  Due: {assignment['due'] or 'Not specified'}\n"
+                    f"{progress['submitted']} of {progress['total']} problems submitted")
+            ttk.Label(card, text=info, style='Info.TLabel').pack(anchor='w', pady=(7, 12))
+            footer = ttk.Frame(card, style='Surface.TFrame')
+            footer.pack(fill='x')
+            badge = 'Success.TLabel' if progress['status'].lower() == 'completed' else 'Warning.TLabel'
+            ttk.Label(footer, text=progress['status'].upper(), style=badge).pack(side='left')
+            ttk.Button(footer, text='Open Lab', style='Primary.TButton',
+                       command=lambda ident=assignment['id']: self.show_assignment(ident)).pack(side='right')
+
+    def get_assignment(self, ident):
+        item = next((a for a in labs.for_student(labs.load_store(), self.username) if a['id'] == ident), None)
+        if item is None:
+            raise ValueError('This assignment is no longer assigned to you.')
+        return item
+
+    def show_assignment(self, ident):
+        try:
+            item = self.get_assignment(ident)
+        except (OSError, ValueError) as error:
+            messagebox.showerror('Lab Assignment', str(error), parent=self.parent)
+            self.show_dashboard()
+            return
+        self.current_due = item['due']
+        self.clear()
+        ttk.Button(self.parent, text='← Back to assignments', command=self.show_dashboard).pack(anchor='w')
+        ttk.Label(self.parent, text=f"{item['title']} — {ident}", style='Title.TLabel', wraplength=800).pack(anchor='w', pady=8)
+        ttk.Label(self.parent, text=f"Due: {item['due'] or 'Not specified'}", style='Subtitle.TLabel').pack(anchor='w')
+        description = ScrolledText(self.parent, height=3, wrap='word')
+        description.pack(fill='x')
+        description.insert('1.0', item['description'])
+        description.configure(state='disabled')
+        questions = ttk.Treeview(self.parent, columns=('status',), show='tree headings')
+        ui.configure_tree_tags(questions)
+        questions.heading('#0', text='Problem')
+        questions.heading('status', text='Status')
+        controls = ttk.Frame(self.parent)
+        controls.pack(side='bottom', fill='x')
+        def open_selected():
+            selection = questions.selection()
+            if selection:
+                self.show_problem(ident, selection[0])
+        ttk.Button(controls, text='Open Problem', command=open_selected).pack(anchor='w')
+        bar = ttk.Scrollbar(self.parent, command=questions.yview)
+        bar.pack(side='right', fill='y')
+        questions.configure(yscrollcommand=bar.set)
+        questions.pack(fill='both', expand=True)
+        questions.bind('<Double-1>', lambda _event: open_selected())
+        for index, problem in enumerate(item['problems']):
+            questions.insert('', 'end', iid=problem['id'], text=f"{problem['id']} — {problem['title']}",
+                             values=(labs.submission_status(ident, problem['id']),),
+                             tags=('even' if index % 2 == 0 else 'odd',))
+        ui.refresh_classic_widgets(self.parent)
+
+    def show_problem(self, ident, question):
+        try:
+            problem = labs.selected_problem(ident, question)
+        except (OSError, ValueError) as error:
+            messagebox.showerror('Problem', str(error), parent=self.parent)
+            self.show_dashboard()
+            return
+        if labs.evaluator_enabled(problem):
+            if self.evaluator_window is not None and self.evaluator_window.winfo_exists():
+                self.evaluator_window.lift()
+                return
+            self.evaluator_window = EvaluatorWorkspace(self.parent.winfo_toplevel(), problem, self.drafts, (ident, question), getattr(self, 'current_due', ''))
+            return
+        self.clear()
+        ttk.Button(self.parent, text='← Back to lab', command=lambda: self.back(ident)).pack(anchor='w')
+        ttk.Label(self.parent, text=f"{question} — {problem['title']}", style='Title.TLabel', wraplength=800).pack(anchor='w')
+        ttk.Label(self.parent, text=f"Language: {problem['language']}", style='Subtitle.TLabel').pack(anchor='w')
+        footer = ttk.Frame(self.parent)
+        footer.pack(side='bottom', fill='x', pady=8)
+        ttk.Button(footer, text='Submit Code', style='Primary.TButton',
+                   command=lambda: self.save(ident, question)).pack(side='right')
+        panes = ttk.Panedwindow(self.parent, orient='vertical')
+        panes.pack(fill='both', expand=True)
+        statement, answer = ttk.Frame(panes), ttk.Frame(panes)
+        panes.add(statement, weight=1)
+        panes.add(answer, weight=2)
+        ttk.Label(statement, text='Problem Statement', style='Subtitle.TLabel').pack(anchor='w')
+        text = ScrolledText(statement, height=4, wrap='word', relief='flat', borderwidth=0,
+                            padx=12, pady=10, background='#ffffff', foreground=ui.TEXT)
+        text.pack(fill='both', expand=True)
+        text.insert('1.0', problem['problem_statement'])
+        text.configure(state='disabled')
+        ttk.Label(answer, text='Your Code', style='Subtitle.TLabel').pack(anchor='w')
+        self.code = ScrolledText(answer, height=6, wrap='none', undo=True)
+        ui.code_widget(self.code)
+        self.code.pack(fill='both', expand=True)
+        saved = labs.read_submission(labs.identity(), ident, question)
+        if saved['status'] == 'Submitted':
+            self.code.insert('1.0', saved['code'])
+        ui.refresh_classic_widgets(self.parent)
+
+    def back(self, ident):
+        if self.code.get('1.0', 'end-1c').strip() and not messagebox.askyesno('Back to Lab', 'Leave the editor? Unsaved changes will be discarded.', parent=self.parent):
+            return
+        self.show_assignment(ident)
+
+    def save(self, ident, question):
+        try:
+            labs.submit(ident, question, self.code.get('1.0', 'end-1c'))
+        except (OSError, ValueError, KeyError) as error:
+            messagebox.showerror('Submission not saved', str(error), parent=self.parent)
+            return
+        messagebox.showinfo('Submitted', 'Your answer was saved.', parent=self.parent)
+        self.show_assignment(ident)
+
+
+def build_window(username, student):
+    window = tk.Tk()
+    window.title("EduOS Student Portal")
+    window.geometry("720x520")
+    window.minsize(600, 420)
+    mode = ui.install_theme(window)
+    ui.set_fullscreen(window, True)
+    window.bind("<F11>", lambda _event: ui.toggle_fullscreen(window))
+    window.bind("<Escape>", lambda _event: ui.set_fullscreen(window, False))
+
+    outer = ttk.Frame(window, padding=(34, 24))
+    outer.pack(fill="both", expand=True)
+
+    ttk.Label(outer, text="EduOS", style="Title.TLabel").pack(anchor="w")
+    ttk.Label(
+        outer,
+        text="Academic Computing Platform",
+        style="Subtitle.TLabel",
+    ).pack(anchor="w", pady=(2, 22))
+
+    identity = ttk.Frame(outer, style="Card.TFrame", padding=18)
+    identity.pack(fill="x", pady=(0, 18))
+    ttk.Button(identity, text='Log Out / Switch User', command=lambda: logout_session(window)).pack(side='right')
+    theme_label = tk.StringVar(value=ui.theme_action(mode))
+    def switch_theme():
+        try:
+            selected = ui.toggle_theme(window)
+        except OSError:
+            messagebox.showerror('Appearance', 'The theme preference could not be saved.', parent=window)
+            return
+        theme_label.set(ui.theme_action(selected))
+    ttk.Button(identity, textvariable=theme_label, command=switch_theme).pack(side='right', padx=(0, 10))
+    ttk.Label(identity, text=student['display_name'], style="CardTitle.TLabel").pack(anchor="w")
+    ttk.Label(identity, text=(f"Student account  ·  Roll number: {student['roll_number']}  ·  "
+                              f"Linux username: {username}"),
+              style="Info.TLabel").pack(anchor="w", pady=(5, 0))
+
+    tabs = ttk.Notebook(outer)
+    tabs.pack(fill='both', expand=True)
+    assignments = ttk.Frame(tabs, padding=(8, 18))
+    edulab_frame = ttk.Frame(tabs, padding=(8, 18))
+    tabs.add(assignments, text='Lab Assignments')
+    tabs.add(edulab_frame, text='EduLab Assessments')
+    window.lab_assignments = LabAssignments(assignments, username)
+    window.edulab = EduLabPanel(window, edulab_frame)
+    window.student_tabs = tabs
+    window.theme_label = theme_label
+    tabs.bind('<<NotebookTabChanged>>', lambda _event: window.edulab.refresh()
+              if tabs.select() == str(edulab_frame) else None)
+    ui.refresh_classic_widgets(window)
+
+    return window
+
+
+def main():
+    username = pwd.getpwuid(os.getuid()).pw_name
+    if os.getuid() != os.geteuid() or not labs.STUDENT.fullmatch(username):
+        return 0
+
+    try:
+        student = load_student_data(username)
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("EduOS Student Portal", str(error))
+        root.destroy()
+        return 1
+
+    if student is None:
+        return 0
+
+    restore_lockdown()
+    configure_student_desktop()
+    window = build_window(username, student)
+    window.mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

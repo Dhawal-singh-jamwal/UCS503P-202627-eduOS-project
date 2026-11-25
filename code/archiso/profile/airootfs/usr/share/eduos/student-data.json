@@ -1,0 +1,82 @@
+{
+  "student1000": {
+    "roll_number": "1000",
+    "display_name": "Student 1000",
+    "tasks": [
+      {
+        "title": "C++ Lab 1",
+        "status": "Active",
+        "due": "2026-09-18"
+      },
+      {
+        "title": "Linux Shell Practice",
+        "status": "In progress",
+        "due": "2026-09-20"
+      }
+    ]
+  },
+  "student1001": {
+    "roll_number": "1001",
+    "display_name": "Student 1001",
+    "tasks": [
+      {
+        "title": "Operating Systems Worksheet",
+        "status": "Active",
+        "due": "2026-09-17"
+      },
+      {
+        "title": "Git Fundamentals",
+        "status": "Not started",
+        "due": "2026-09-21"
+      }
+    ]
+  },
+  "student1002": {
+    "roll_number": "1002",
+    "display_name": "Student 1002",
+    "tasks": [
+      {
+        "title": "Networking Lab Preparation",
+        "status": "Active",
+        "due": "2026-09-19"
+      },
+      {
+        "title": "Packet Analysis Exercise",
+        "status": "In progress",
+        "due": "2026-09-22"
+      }
+    ]
+  },
+  "student1003": {
+    "roll_number": "1003",
+    "display_name": "Student 1003",
+    "tasks": [
+      {
+        "title": "Database Query Practice",
+        "status": "Active",
+        "due": "2026-09-18"
+      },
+      {
+        "title": "Schema Design Review",
+        "status": "Not started",
+        "due": "2026-09-23"
+      }
+    ]
+  },
+  "student1004": {
+    "roll_number": "1004",
+    "display_name": "Student 1004",
+    "tasks": [
+      {
+        "title": "Python Programming Lab",
+        "status": "Active",
+        "due": "2026-09-20"
+      },
+      {
+        "title": "Algorithm Analysis Notes",
+        "status": "In progress",
+        "due": "2026-09-24"
+      }
+    ]
+  }
+}

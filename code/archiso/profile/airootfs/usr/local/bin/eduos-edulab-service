@@ -1,0 +1,56 @@
+#!/usr/bin/python3 -I
+"""Root-owned local EduLab socket service; Linux peer credentials identify students."""
+import json
+import os
+import socket
+import struct
+import sys
+
+sys.path.insert(0, '/usr/share/eduos')
+import eduos_edulab as lab
+
+SHAPES = {'list': {'action'}, 'start': {'action', 'assessment_id'},
+          'state': {'action', 'assessment_id'}, 'save': {'action', 'assessment_id', 'question_id', 'source'},
+          'run_example': {'action', 'assessment_id', 'question_id', 'source'},
+          'result': {'action', 'assessment_id'},
+          'submit': {'action', 'assessment_id'}, 'violation': {'action', 'assessment_id', 'type'}}
+
+
+def handle(uid, raw):
+    request = lab.decode(raw)
+    if not isinstance(request, dict) or request.get('action') not in SHAPES or set(request) != SHAPES[request['action']]:
+        raise lab.LabError('Invalid EduLab request.')
+    return lab.student(uid, request['action'], request)
+
+
+def main():
+    if os.geteuid() != 0 or len(sys.argv) != 1:
+        return 1
+    listener = socket.socket(fileno=3)  # systemd socket activation
+    while True:
+        client, _ = listener.accept()
+        with client:
+            client.settimeout(5)
+            try:
+                _pid, uid, _gid = struct.unpack('3i', client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                raw = bytearray()
+                while len(raw) <= 200000 and not raw.endswith(b'\n'):
+                    chunk = client.recv(min(4096, 200001 - len(raw)))
+                    if not chunk:
+                        break
+                    raw.extend(chunk)
+                if len(raw) > 200000 or not raw.endswith(b'\n'):
+                    raise lab.LabError('EduLab request is too large or incomplete.')
+                response = {'ok': True, **handle(uid, bytes(raw))}
+            except (lab.LabError, OSError, UnicodeError) as error:
+                response = {'ok': False, 'error': str(error)[:256]}
+            except Exception:
+                response = {'ok': False, 'error': 'EduLab operation failed. Refresh and retry.'}
+            try:
+                client.sendall((json.dumps(response, ensure_ascii=False) + '\n').encode())
+            except OSError:
+                pass
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

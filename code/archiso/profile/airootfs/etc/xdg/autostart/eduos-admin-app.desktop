@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=EduOS Admin Dashboard
+Comment=Open the EduOS administration dashboard
+Exec=/usr/local/bin/eduos-admin-app
+TryExec=/usr/local/bin/eduos-admin-app
+Terminal=false
+OnlyShowIn=XFCE;
+X-GNOME-Autostart-enabled=true

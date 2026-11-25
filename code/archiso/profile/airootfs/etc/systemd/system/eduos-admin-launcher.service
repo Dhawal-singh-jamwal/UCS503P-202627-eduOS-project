@@ -1,0 +1,17 @@
+[Unit]
+Description=Install the EduOS administrator's personal application launcher
+Requires=eduos-setup.service
+After=eduos-setup.service
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+User=eduos
+UMask=0077
+NoNewPrivileges=yes
+ExecStart=/usr/bin/install -d -m 0700 /home/eduos/.local/share/applications
+ExecStart=/usr/bin/install -m 0600 /usr/share/eduos/eduos-admin.desktop /home/eduos/.local/share/applications/eduos-admin.desktop
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

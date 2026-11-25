@@ -1,0 +1,1056 @@
+#!/usr/bin/python3 -I
+"""Fixed, stdin-only administrative interface. Never run this through a shell."""
+
+import contextlib
+import copy
+import datetime
+import fcntl
+import grp
+import hashlib
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+
+
+# This import directory is root-owned and not writable by students.
+sys.path.insert(0, '/usr/share/eduos')
+import eduos_assignments as labs
+import eduos_submissions as submissions
+import eduos_machine as machine
+import eduos_edulab as edulab
+
+ROOT = Path('/var/lib/eduos')
+ASSIGNMENTS = ROOT / 'assignments.json'
+REGISTRY = ROOT / 'account-state.json'
+VIEWS = ROOT / 'student-views'
+DEFAULT_DATA = Path('/usr/share/eduos/student-data.json')
+
+DATA = ROOT / 'student-data.json'
+STATE = ROOT / 'account-recovery.json'
+DELETED = ROOT / 'deleted-students.json'
+LOCK = Path('/run/eduos-admin.lock')
+MAX_BYTES = 1024 * 1024
+USERNAME = re.compile(r'student[0-9]{4}', re.ASCII)
+SAFE_ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C'}
+
+
+class RequestError(Exception):
+    pass
+
+
+def username(value):
+    if not isinstance(value, str) or USERNAME.fullmatch(value) is None:
+        raise RequestError('Username must be student followed by exactly four ASCII digits.')
+    return value
+
+
+def text_field(value, label, limit=256, empty=False):
+    if (not isinstance(value, str) or len(value) > limit
+            or (not empty and not value.strip())
+            or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        raise RequestError(f'{label} must be valid single-line text (maximum {limit} characters).')
+    return value
+
+
+def password_field(value):
+    # Delimiters/control characters cannot inject another chpasswd record.
+    text_field(value, 'Password', 1024)
+    if ':' in value:
+        raise RequestError('Passwords cannot contain colons or control characters.')
+    return value
+
+
+def no_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise RequestError('JSON contains duplicate object keys.')
+        result[key] = value
+    return result
+
+
+def decode(raw):
+    try:
+        return json.loads(raw, object_pairs_hook=no_duplicates,
+                          parse_constant=lambda _value: (_ for _ in ()).throw(
+                              RequestError('Non-finite JSON numbers are not allowed.')))
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise RequestError('Invalid JSON input.') from error
+
+
+def reject_secret_fields(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if any(word in key.casefold() for word in ('password', 'passwd')):
+                raise RequestError('Password fields are not allowed in academic metadata.')
+            reject_secret_fields(item)
+    elif isinstance(value, list):
+        for item in value:
+            reject_secret_fields(item)
+
+
+def validate_data(data):
+    if not isinstance(data, dict):
+        raise RequestError('Student data must be an object keyed by username.')
+    reject_secret_fields(data)
+    for name, student in data.items():
+        username(name)
+        if not isinstance(student, dict) or not {'roll_number', 'display_name', 'tasks'} <= student.keys():
+            raise RequestError('Every student needs roll_number, display_name and tasks.')
+        text_field(student['roll_number'], 'Roll number', 64)
+        text_field(student['display_name'], 'Display name')
+        tasks = student['tasks']
+        if not isinstance(tasks, list) or len(tasks) > 1000:
+            raise RequestError('Tasks must be an array with at most 1000 entries.')
+        for task in tasks:
+            if not isinstance(task, dict) or not {'title', 'status', 'due'} <= task.keys():
+                raise RequestError('Every task needs title, status and due.')
+            text_field(task['title'], 'Task title', 512)
+            text_field(task['status'], 'Task status', 128)
+            text_field(task['due'], 'Due information', 256, empty=True)
+    return data
+
+
+def authorize(argv):
+    if len(argv) != 1 or os.getuid() != 0 or os.geteuid() != 0:
+        raise RequestError('Access denied: use the fixed sudo helper as eduos.')
+    origin = os.environ.get('SUDO_UID', '')
+    if not origin.isascii() or not origin.isdecimal() or int(origin) == 0:
+        raise RequestError('Access denied: missing administrator identity.')
+    try:
+        account = pwd.getpwuid(int(origin))
+    except KeyError as error:
+        raise RequestError('Access denied: unknown administrator.') from error
+    if account.pw_name != 'eduos' or os.environ.get('SUDO_USER') != 'eduos':
+        raise RequestError('Access denied: only eduos may use this helper.')
+
+
+def secure_directory(path):
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise RequestError('Administrative storage has unsafe ownership or permissions.')
+
+
+@contextlib.contextmanager
+def mutation_lock():
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o077:
+            raise RequestError('Administrative lock has unsafe permissions.')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RequestError('Another administrator operation is running. Try again.') from error
+        yield
+    finally:
+        os.close(fd)
+
+
+def read_bytes(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(fd, 'rb') as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise RequestError('Administrative data has unsafe ownership or permissions.')
+        raw = source.read(MAX_BYTES + 1)
+    if len(raw) > MAX_BYTES:
+        raise RequestError('Data exceeds the 1 MiB limit.')
+    return raw
+
+
+def revision(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def load_data():
+    raw = read_bytes(DATA)
+    return validate_data(decode(raw)), revision(raw)
+
+
+def atomic_json(path, data, mode, validator, expected_revision=None):
+    validator(data)
+    raw = (json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False) + '\n').encode('utf-8')
+    if len(raw) > MAX_BYTES:
+        raise RequestError('Data exceeds the 1 MiB limit.')
+    secure_directory(path.parent)
+    fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            os.fchown(stream.fileno(), 0, 0)
+            os.fchmod(stream.fileno(), mode)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        validator(decode(Path(temporary).read_bytes()))
+        if expected_revision is not None and revision(read_bytes(path)) != expected_revision:
+            raise RequestError('Student data changed during this operation. Refresh before saving.')
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    # Replacement is already committed. A directory fsync failure is a durability
+    # warning, not a claim that the old document is still present.
+    warning = None
+    try:
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError:
+        warning = 'Saved, but directory synchronization failed; durability across a crash is uncertain.'
+    return revision(raw), warning
+
+
+def validate_state(data):
+    if not isinstance(data, dict):
+        raise RequestError('Invalid account recovery state.')
+    for name, item in data.items():
+        username(name)
+        if (not isinstance(item, dict) or set(item) != {'locked', 'expire'}
+                or type(item['locked']) is not bool
+                or not isinstance(item['expire'], str)
+                or (item['expire'] and not re.fullmatch(r'[0-9]{1,8}', item['expire']))):
+            raise RequestError('Invalid account recovery state.')
+    return data
+
+
+def load_state():
+    try:
+        return validate_state(decode(read_bytes(STATE)))
+    except FileNotFoundError:
+        return {}
+
+
+def validate_deleted(data):
+    if (not isinstance(data, dict) or set(data) != {'students'}
+            or not isinstance(data['students'], list) or len(data['students']) > 10000):
+        raise RequestError('Invalid deleted-student state.')
+    names = data['students']
+    for name in names:
+        username(name)
+    if names != sorted(set(names)):
+        raise RequestError('Deleted-student names must be unique and sorted.')
+    return data
+
+
+def load_deleted():
+    try:
+        return validate_deleted(decode(read_bytes(DELETED)))
+    except FileNotFoundError:
+        return {'students': []}
+
+
+def persistent_state_available():
+    """True only when /var/lib/eduos is the separately mounted state disk."""
+    try:
+        return ROOT.is_dir() and os.path.ismount(ROOT)
+    except OSError:
+        return False
+
+
+def require_persistent_state():
+    if not persistent_state_available():
+        raise RequestError('The EDUOS_STATE disk is not mounted. Account changes are disabled so they cannot be lost at reboot.')
+
+
+def local_users():
+    with open('/etc/passwd', encoding='utf-8') as stream:
+        return {line.split(':', 1)[0] for line in stream if ':' in line}
+
+
+def student_account(name):
+    username(name)
+    try:
+        entry = pwd.getpwnam(name)
+    except KeyError as error:
+        raise RequestError('The Linux student account does not exist.') from error
+    if name not in local_users():
+        raise RequestError('Only local Linux accounts may be managed.')
+    forbidden = any(g.gr_name in {'root', 'wheel', 'sudo'} and
+                    (g.gr_gid == entry.pw_gid or name in g.gr_mem) for g in grp.getgrall())
+    if entry.pw_uid < 1000 or entry.pw_gid == 0 or forbidden:
+        raise RequestError('Privileged or system accounts cannot be managed.')
+    if any(p.pw_uid == entry.pw_uid and p.pw_name != name for p in pwd.getpwall()):
+        raise RequestError('Accounts sharing a Linux UID cannot be managed.')
+    return entry
+
+
+def shadow_status(name):
+    # Python 3.13+ no longer provides spwd. Only return status, never the hash.
+    with open('/etc/shadow', encoding='utf-8') as stream:
+        for line in stream:
+            fields = line.rstrip('\n').split(':')
+            if fields[0] == name and len(fields) >= 8:
+                return {'locked': fields[1].startswith(('!', '*')), 'expire': fields[7]}
+    raise RequestError('Cannot retrieve account status.')
+
+
+def account_info(name, state):
+    try:
+        entry = pwd.getpwnam(name)
+    except KeyError:
+        return {'username': name, 'exists': False, 'status': 'Linux account missing', 'manageable': False}
+    result = {'username': name, 'exists': True, 'uid': entry.pw_uid, 'gid': entry.pw_gid,
+              'home': entry.pw_dir, 'shell': entry.pw_shell, 'manageable': False,
+              'managed_disabled': name in state}
+    try:
+        student_account(name)
+        result['manageable'] = True
+        status = shadow_status(name)
+        today = (datetime.datetime.now(datetime.timezone.utc).date() - datetime.date(1970, 1, 1)).days
+        expired = bool(status['expire']) and int(status['expire']) <= today
+        result['status'] = ('Account expired; password locked' if expired and status['locked'] else
+                            'Account expired' if expired else
+                            'Password locked' if status['locked'] else 'Enabled')
+        if name in state:
+            result['status'] += ' (restore state recorded)'
+    except (RequestError, ValueError):
+        result['status'] = 'Account unavailable for management'
+    return result
+
+
+def run_account(command, input_text=None):
+    # Never include subprocess output, request contents or passwords in errors.
+    # subprocess.run waits for completion so the GUI cannot abandon a mutation
+    # halfway through; the GUI performs requests in a worker thread.
+    result = subprocess.run(command, input=input_text, text=True, env=SAFE_ENV,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            check=False)
+    if result.returncode:
+        raise RequestError(f'Linux operation {Path(command[0]).name} failed (exit {result.returncode}).')
+
+
+def validate_registry(data):
+    if not isinstance(data, dict) or set(data) != {'version', 'students'} or data['version'] != 1 or not isinstance(data['students'], dict):
+        raise RequestError('Invalid persistent account registry.')
+    ids, gids = set(), set()
+    for name, item in data['students'].items():
+        username(name)
+        if not isinstance(item, dict) or set(item) != {'uid', 'gid', 'shadow'}:
+            raise RequestError('Invalid persistent account fields.')
+        for key, seen in [('uid', ids), ('gid', gids)]:
+            value = item[key]
+            if type(value) is not int or not 1000 <= value < 60000 or value in seen:
+                raise RequestError('Invalid or duplicate persisted account identity.')
+            seen.add(value)
+        shadow = item['shadow']
+        if not isinstance(shadow, dict) or set(shadow) != {'hash', 'last_change', 'min', 'max', 'warn', 'inactive', 'expire'}:
+            raise RequestError('Invalid persistent password state.')
+        hashed = shadow['hash']
+        if (not isinstance(hashed, str) or len(hashed) > 2048
+                or not re.fullmatch(r'[!*$A-Za-z0-9./=,+_-]+', hashed)
+                or not (re.fullmatch(r'[!*]+', hashed) or re.fullmatch(r'!*\$[A-Za-z0-9]+\$[^$]+\$.+', hashed))):
+            raise RequestError('Only password hashes or locked markers may be persisted.')
+        for key in set(shadow) - {'hash'}:
+            if not isinstance(shadow[key], str) or not re.fullmatch(r'[0-9]{0,8}', shadow[key]):
+                raise RequestError('Invalid persistent password aging state.')
+    return data
+
+
+def load_registry():
+    info = REGISTRY.lstat()
+    if info.st_mode & 0o077:
+        raise RequestError('Account registry must be root-only.')
+    return validate_registry(decode(read_bytes(REGISTRY)))
+
+
+def shadow_record(name):
+    with open('/etc/shadow', encoding='utf-8') as stream:
+        for line in stream:
+            fields = line.rstrip('\n').split(':')
+            if fields[0] == name and len(fields) == 9:
+                return dict(zip(('hash', 'last_change', 'min', 'max', 'warn', 'inactive', 'expire'), fields[1:8]))
+    raise RequestError('Cannot persist the Linux password state.')
+
+
+def managed_accounts():
+    accounts = []
+    for entry in pwd.getpwall():
+        if USERNAME.fullmatch(entry.pw_name):
+            accounts.append(student_account(entry.pw_name))
+    return accounts
+
+
+def ensure_private_roots():
+    for parent in (VIEWS, labs.SUBMISSIONS):
+        parent.mkdir(mode=0o755, exist_ok=True)
+        secure_directory(parent)
+
+
+def ensure_student_directory(parent, entry):
+    secure_directory(parent)
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            os.mkdir(entry.pw_name, 0o700, dir_fd=fd)
+        except FileExistsError:
+            pass
+        child = os.open(entry.pw_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            info = os.fstat(child)
+            if info.st_uid not in (0, entry.pw_uid):
+                raise RequestError('Persistent directory belongs to a different Linux identity.')
+            os.fchown(child, entry.pw_uid, entry.pw_gid)
+            os.fchmod(child, 0o700)
+            os.fsync(child)
+            os.fsync(fd)
+        finally:
+            os.close(child)
+    finally:
+        os.close(fd)
+
+
+def publish_view(entry, store):
+    # No pathname dereference beneath a student-owned directory as root.
+    with labs.private_directory(VIEWS, entry, ()) as fd:
+        raw = (json.dumps(store, ensure_ascii=False, indent=2) + '\n').encode()
+        temporary = '.view-' + labs.secrets.token_hex(16)
+        out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        try:
+            with os.fdopen(out, 'wb') as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fchown(stream.fileno(), entry.pw_uid, entry.pw_gid)
+                os.fchmod(stream.fileno(), 0o600)
+                os.fsync(stream.fileno())
+            os.replace(temporary, 'assignments.json', src_dir_fd=fd, dst_dir_fd=fd)
+            os.fsync(fd)
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+
+
+def regenerate_views(store, empty=False):
+    ensure_private_roots()
+    for entry in managed_accounts():
+        ensure_student_directory(VIEWS, entry)
+        ensure_student_directory(labs.SUBMISSIONS, entry)
+        projection = {'assignments': [] if empty else labs.for_student(store, entry.pw_name)}
+        publish_view(entry, projection)
+
+
+def persist_accounts():
+    registry = load_registry()
+    deleted = set(load_deleted()['students'])
+    registry['students'] = {name: record for name, record in registry['students'].items() if name not in deleted}
+    for entry in managed_accounts():
+        if entry.pw_name not in deleted:
+            registry['students'][entry.pw_name] = {'uid': entry.pw_uid, 'gid': entry.pw_gid, 'shadow': shadow_record(entry.pw_name)}
+    _, warning = atomic_json(REGISTRY, registry, 0o600, validate_registry)
+    if warning:
+        raise RequestError('Account state saved but could not be synchronized; check state disk before shutdown.')
+    store = labs.validate_store(decode(read_bytes(ASSIGNMENTS)))
+    regenerate_views(store)
+
+
+@contextlib.contextmanager
+def account_snapshot_on_exit(action):
+    # The surrounding administrative lock covers Linux mutation AND persistence.
+    try:
+        yield
+    finally:
+        if action in {'create', 'save', 'reset_password', 'disable', 'enable'}:
+            try:
+                persist_accounts()
+            except Exception as error:
+                raise RequestError('PARTIAL FAILURE: runtime changes may have occurred, but persistent account state or views could not be saved. Repair the state disk before rebooting.') from error
+
+
+def initialize_state():
+    secure_directory(ROOT)
+    seeds = [(DATA, None, 0o644, validate_data),
+             (ASSIGNMENTS, {'assignments': []}, 0o600, labs.validate_store),
+             (REGISTRY, {'version': 1, 'students': {}}, 0o600, validate_registry),
+             (STATE, {}, 0o600, validate_state),
+             (DELETED, {'students': []}, 0o600, validate_deleted)]
+    for path, default, mode, validator in seeds:
+        if not os.path.lexists(path):
+            if path == DATA:
+                default = validate_data(decode(DEFAULT_DATA.read_bytes()))
+                deleted = set(load_deleted()['students'])
+                default = {name: record for name, record in default.items() if name not in deleted}
+            atomic_json(path, default, mode, validator)
+        # Existing documents are validated, never reseeded or overwritten.
+        validator(decode(read_bytes(path)))
+        os.chmod(path, mode, follow_symlinks=False)
+    ensure_private_roots()
+
+
+def restore_account(name, record, metadata):
+    username(name)
+    uid, gid = record['uid'], record['gid']
+    shadow = record['shadow']
+    # This Arch image's chage has no -m/--mindays option. Empty and zero both
+    # mean no minimum-age restriction; reject other values rather than silently
+    # weakening a persisted password policy.
+    if shadow['min'] not in ('', '0'):
+        raise RequestError('Persisted minimum password age is unsupported by this image.')
+    for entry in pwd.getpwall():
+        if entry.pw_uid == uid and entry.pw_name != name:
+            raise RequestError('Persisted UID conflicts with an existing Linux account. Restore stopped.')
+    try:
+        group = grp.getgrgid(gid)
+    except KeyError:
+        run_account(['/usr/bin/groupadd', '--gid', str(gid), '--', name])
+    else:
+        if group.gr_name != name:
+            raise RequestError('Persisted GID conflicts with an existing Linux group. Restore stopped.')
+    try:
+        entry = pwd.getpwnam(name)
+    except KeyError:
+        run_account(['/usr/bin/useradd', '--create-home', '--uid', str(uid), '--gid', str(gid), '--shell', '/bin/bash', '--', name])
+    else:
+        if entry.pw_uid != uid or entry.pw_gid != gid:
+            raise RequestError('Persisted student identity differs from the current account.')
+    student_account(name)
+    roll = metadata.get(name, {}).get('roll_number', name[7:])
+    run_account(['/usr/bin/usermod', '--comment', roll, '--shell', '/bin/bash', '--', name])
+    # Hashes, just like incoming passwords, are passed only via stdin.
+    run_account(['/usr/bin/chpasswd', '--encrypted'], name + ':' + shadow['hash'] + '\n')
+    command = ['/usr/bin/chage']
+    for option, key in [('-d', 'last_change'), ('-M', 'max'), ('-W', 'warn'), ('-I', 'inactive'), ('-E', 'expire')]:
+        command += [option, shadow[key] or '-1']
+    run_account(command + ['--', name])
+
+
+def restore_state():
+    if os.getuid() != 0 or os.geteuid() != 0:
+        raise RequestError('Account restoration requires root.')
+    with mutation_lock():
+        initialize_state()
+        registry = load_registry()
+        data, _ = load_data()
+        deleted = set(load_deleted()['students'])
+        # Restore all recorded numeric identities before allocating new built-ins.
+        for name, record in sorted(registry['students'].items(), key=lambda item: item[1]['uid']):
+            if name not in deleted:
+                try:
+                    restore_account(name, record, data)
+                except RequestError as error:
+                    raise RequestError(f'Could not restore {name}: {error}') from error
+        for index in range(5):
+            name = f'student{1000 + index}'
+            if name not in data or name in deleted or name in registry['students']:
+                continue
+            try:
+                pwd.getpwnam(name)
+            except KeyError:
+                run_account(['/usr/bin/useradd', '--create-home', '--user-group', '--comment', str(1000 + index), '--shell', '/bin/bash', '--', name])
+                run_account(['/usr/bin/chpasswd'], f'{name}:user{index + 1}\n')
+            student_account(name)
+        try:
+            persist_accounts()
+        except RequestError as error:
+            raise RequestError(f'Could not save restored account state: {error}') from error
+
+
+def student_has_processes(uid):
+    """Block deletion while any process still uses the student's UID."""
+    for process in os.scandir('/proc'):
+        if not process.name.isascii() or not process.name.isdecimal():
+            continue
+        try:
+            with open(f'/proc/{process.name}/status', encoding='ascii') as source:
+                line = next((line for line in source if line.startswith('Uid:')), '')
+        except FileNotFoundError:
+            continue  # A process exited during inspection.
+        except OSError as error:
+            raise RequestError('Could not verify student sessions. Try again.') from error
+        if line and uid in [int(value) for value in line.split()[1:5]]:
+            return True
+    return False
+
+
+def checked_home(name, uid):
+    """Only a real directory owned by the recorded student may be removed."""
+    username(name)
+    base = submissions.HOME_ROOT
+    secure_directory(base)
+    path = base / name
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or os.path.ismount(path)
+            or not shutil.rmtree.avoids_symlink_attacks):
+        raise RequestError('Student home is unsafe or belongs to another identity; deletion stopped.')
+    return path
+
+
+def remove_student_tree(base, name, uid=None):
+    """Remove one internally named child of a root-owned EduOS state root."""
+    username(name)
+    try:
+        secure_directory(base)
+    except FileNotFoundError:
+        return
+    path = base / name
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if (not stat.S_ISDIR(info.st_mode) or (uid is not None and info.st_uid not in (0, uid))
+            or os.path.ismount(path) or not shutil.rmtree.avoids_symlink_attacks):
+        raise RequestError('Student EduOS storage has unsafe ownership or type; deletion stopped.')
+    shutil.rmtree(path)
+
+
+def delete_student(name, data, current, state):
+    """Tombstone first, then remove runtime and persistent state under the admin lock."""
+    username(name)
+    registry_raw = read_bytes(REGISTRY)
+    registry = validate_registry(decode(registry_raw))
+    deleted = load_deleted()
+    known = name in data or name in registry['students'] or name in deleted['students']
+    if not known:
+        raise RequestError('Student record is already absent. Refresh the dashboard.')
+    was_already_deleted = name not in data and name not in registry['students']
+    try:
+        entry = pwd.getpwnam(name)
+    except KeyError:
+        entry = None
+    uid = registry['students'].get(name, {}).get('uid')
+    if entry is not None:
+        student_account(name)
+        if entry.pw_dir != str(submissions.HOME_ROOT / name):
+            raise RequestError('Student home is not the expected EduOS home; deletion stopped.')
+        uid = entry.pw_uid
+        checked_home(name, uid)
+        if student_has_processes(uid):
+            raise RequestError('Student is currently logged in or has running processes. Log out before deletion.')
+    elif uid is not None:
+        home = checked_home(name, uid)
+        if home is not None:
+            try:
+                other = pwd.getpwuid(uid)
+            except KeyError:
+                pass
+            else:
+                if other.pw_name != name:
+                    raise RequestError('Persisted student UID now belongs to another account; home cleanup stopped.')
+    store_raw = read_bytes(ASSIGNMENTS)
+    try:
+        store = labs.validate_store(labs.decode(store_raw))
+    except ValueError as error:
+        raise RequestError(str(error)) from error
+    assignments = copy.deepcopy(store)
+    remaining = []
+    for item in assignments['assignments']:
+        if name in item['assigned_to']:
+            item['assigned_to'] = [student for student in item['assigned_to'] if student != name]
+        if item['assigned_to']:
+            remaining.append(item)
+    assignments['assignments'] = remaining
+    try:
+        labs.validate_store(assignments)
+    except ValueError as error:
+        raise RequestError(str(error)) from error
+
+    # This durable marker blocks boot restoration even if a later irreversible
+    # userdel or JSON/file cleanup fails. Deletion can then be retried safely.
+    if name not in deleted['students']:
+        deleted['students'].append(name)
+        deleted['students'].sort()
+        try:
+            _, warning = atomic_json(DELETED, deleted, 0o600, validate_deleted)
+        except OSError as error:
+            raise RequestError('Could not record permanent deletion; no account was removed.') from error
+        if warning:
+            raise RequestError('Deletion marker may not survive a crash; no account was removed. Retry deletion.')
+    warnings = []
+    try:
+        if entry is not None:
+            run_account(['/usr/bin/userdel', '--remove', '--', name])
+        if name in data:
+            _, warning = atomic_json(DATA, {key: value for key, value in data.items() if key != name},
+                                     0o644, validate_data, current)
+            if warning:
+                warnings.append(warning)
+        if assignments != store:
+            _, warning = atomic_json(ASSIGNMENTS, assignments, 0o600, labs.validate_store,
+                                     revision(store_raw))
+            if warning:
+                warnings.append(warning)
+        if name in state:
+            _, warning = atomic_json(STATE, {key: value for key, value in state.items() if key != name},
+                                     0o600, validate_state)
+            if warning:
+                warnings.append(warning)
+        remove_student_tree(VIEWS, name, uid)
+        remove_student_tree(labs.SUBMISSIONS, name, uid)
+        if entry is None:
+            if uid is None:
+                if os.path.lexists(submissions.HOME_ROOT / name):
+                    warnings.append('Stale home was left in place: no trusted UID remains to verify its ownership.')
+            else:
+                home = checked_home(name, uid)
+                if home is not None:
+                    shutil.rmtree(home)
+        if name in registry['students']:
+            del registry['students'][name]
+            _, warning = atomic_json(REGISTRY, registry, 0o600, validate_registry,
+                                     revision(registry_raw))
+            if warning:
+                warnings.append(warning)
+        regenerate_views(assignments)
+    except (RequestError, OSError, ValueError) as error:
+        raise RequestError('PARTIAL FAILURE: deletion was recorded, but cleanup did not finish. '
+                           'Refresh and retry Delete Student; the account will not be recreated on reboot. '
+                           f'Detail: {error}') from error
+    return {'success': True, 'linux_account_removed': entry is not None,
+            'linux_account_already_missing': entry is None, 'metadata_removed': name in data,
+            'already_deleted': was_already_deleted and entry is None,
+            'message': f'{name} permanently deleted.', 'warning': ' '.join(warnings) or None}
+
+
+def submission_request(request):
+    entry = student_account(request['username'])
+    with mutation_lock():
+        store = labs.validate_store(decode(read_bytes(ASSIGNMENTS)))
+        assignments = labs.for_student(store, entry.pw_name)
+        if request['action'] == 'get_submission':
+            labs.assignment_id(request['id'])
+            labs.problem_id(request['problem_id'])
+            assignment = next((a for a in assignments if a['id'] == request['id']), None)
+            if assignment is None or request['problem_id'] not in {p['id'] for p in assignment['problems']}:
+                raise RequestError('That problem is not assigned to this student.')
+            problem = next(p for p in assignment['problems'] if p['id'] == request['problem_id'])
+            return labs.read_problem_submission(entry, request['id'], problem)
+        result = []
+        for assignment in assignments:
+            problems = []
+            for problem in assignment['problems']:
+                submission = labs.read_problem_submission(entry, assignment['id'], problem)
+                submission.pop('code', None)
+                record = submission.pop('record', None)
+                if record:
+                    submission['result'] = submissions.summary(record)
+                problems.append({'id': problem['id'], 'title': problem['title'], **submission})
+            result.append({'id': assignment['id'], 'title': assignment['title'], 'problems': problems,
+                           **labs.progress([p['status'] for p in problems])})
+        return {'assignments': result}
+
+
+def assignment_request(request):
+    action = request['action']
+    secure_directory(ASSIGNMENTS.parent)
+    with mutation_lock():
+        raw = read_bytes(ASSIGNMENTS)
+        try:
+            store = labs.validate_store(labs.decode(raw))
+        except ValueError as error:
+            raise RequestError(str(error)) from error
+        current = revision(raw)
+        if action == 'assignment_status':
+            regenerate_views(store)
+            data, _ = load_data()
+            names = []
+            for entry in pwd.getpwall():
+                if USERNAME.fullmatch(entry.pw_name):
+                    try:
+                        student_account(entry.pw_name)
+                    except RequestError:
+                        continue
+                    names.append(entry.pw_name)
+            return {'store': store, 'revision': current,
+                    'students': {name: data.get(name, {}).get('roll_number', name[7:]) for name in sorted(names)}}
+        if request['revision'] != current:
+            raise RequestError('Assignments changed. Refresh before saving; do not repeat a creation blindly.')
+        if action != 'delete_assignment':
+            try:
+                labs.validate_fields(request['assignment'])
+            except ValueError as error:
+                raise RequestError(str(error)) from error
+            for name in request['assignment']['assigned_to']:
+                student_account(name)
+        records = store['assignments']
+        if action == 'create_assignment':
+            number = store.get('next_id', max((int(a['id'][4:]) for a in records), default=0) + 1)
+            ident = f'LAB-{number:04d}'
+            store['next_id'] = number + 1
+            records.append({**request['assignment'], 'id': ident, 'created_by': 'eduos',
+                            'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            'next_problem_id': max(int(p['id'][1:]) for p in request['assignment']['problems']) + 1})
+        else:
+            ident = request['id']
+            try:
+                labs.assignment_id(ident)
+            except ValueError as error:
+                raise RequestError(str(error)) from error
+            target = next((a for a in records if a['id'] == ident), None)
+            if target is None:
+                raise RequestError('Assignment no longer exists. Refresh first.')
+            # Keep a high-water mark even when deleting the highest ID.
+            store.setdefault('next_id', max(int(a['id'][4:]) for a in records) + 1)
+            if action == 'update_assignment':
+                old_ids = {p['id'] for p in target['problems']}
+                for problem in request['assignment']['problems']:
+                    if problem['id'] not in old_ids and int(problem['id'][1:]) < target['next_problem_id']:
+                        raise RequestError('Deleted problem IDs cannot be reused.')
+                target.update(request['assignment'])
+                target['next_problem_id'] = max(target['next_problem_id'], max(int(p['id'][1:]) for p in target['problems']) + 1)
+            else:
+                records.remove(target)
+        try:
+            labs.validate_store(store)
+            # Clear old views before committing a change: failures cannot leave revoked coursework exposed.
+            regenerate_views(store, empty=True)
+            new_revision, warning = atomic_json(ASSIGNMENTS, store, 0o600, labs.validate_store, current)
+            regenerate_views(store)
+        except ValueError as error:
+            raise RequestError(str(error)) from error
+        return {'id': ident, 'revision': new_revision, 'warning': warning, 'message': 'Assignment saved.'}
+
+
+def dispatch(request):
+    shapes = {
+        'edulab_list': {'action'},
+        'edulab_create': {'action', 'assessment'},
+        'edulab_edit': {'action', 'assessment_id', 'assessment'},
+        'edulab_delete': {'action', 'assessment_id'},
+        'edulab_activate': {'action', 'assessment_id'},
+        'edulab_deactivate': {'action', 'assessment_id'},
+        'edulab_reset': {'action', 'assessment_id', 'student'},
+        'edulab_review': {'action', 'assessment_id', 'student', 'feedback', 'final_score'},
+        'machine_info': {'action'},
+        'machine_check': {'action'},
+        'machine_sync': {'action'},
+        'machine_demo_drift': {'action'},
+        'machine_assign': {'action', 'profile_id'},
+        'machine_snapshot': {'action'},
+        'machine_import': {'action', 'snapshot'},
+        'machine_remove': {'action', 'machine_id'},
+        'status': {'action'},
+        'list_student_submissions': {'action', 'username'},
+        'get_submission': {'action', 'username', 'id', 'problem_id'},
+        'assignment_status': {'action'},
+        'create_assignment': {'action', 'revision', 'assignment'},
+        'update_assignment': {'action', 'revision', 'id', 'assignment'},
+        'delete_assignment': {'action', 'revision', 'id'},
+        'save': {'action', 'revision', 'data'},
+        'create': {'action', 'revision', 'username', 'roll_number', 'display_name', 'password'},
+        'delete_student': {'action', 'revision', 'username'},
+        'disable': {'action', 'username'},
+        'enable': {'action', 'username'},
+        'reset_password': {'action', 'username', 'password'},
+    }
+    if not isinstance(request, dict) or not isinstance(request.get('action'), str):
+        raise RequestError('Request must be an object with an action.')
+    action = request['action']
+    if action not in shapes or set(request) != shapes[action]:
+        raise RequestError('Unknown action or invalid request fields.')
+    if 'username' in request:
+        username(request['username'])
+    if 'password' in request:
+        password_field(request['password'])
+    if 'revision' in request and (not isinstance(request['revision'], str)
+                                  or not re.fullmatch('[0-9a-f]{64}', request['revision'])):
+        raise RequestError('A valid data revision is required. Refresh first.')
+    if action.startswith('edulab_'):
+        try:
+            return edulab.admin(action[7:], request)
+        except (edulab.LabError, OSError) as error:
+            raise RequestError(str(error)) from error
+    if action.startswith('machine_'):
+        try:
+            # The same fixed sudo entry point is the sole graphical privilege
+            # boundary. Every machine mutation uses the existing admin lock.
+            if action == 'machine_info':
+                return {'machine': machine.load_machine(), 'profiles': machine.available_profiles(),
+                        'status': machine.cached_status(), 'fleet': machine.fleet()}
+            if action == 'machine_snapshot':
+                return {'snapshot': machine.snapshot()}
+            with mutation_lock():
+                if action in {'machine_import', 'machine_remove'}:
+                    require_persistent_state()
+                    records = (machine.import_snapshot(request['snapshot']) if action == 'machine_import'
+                               else machine.remove_snapshot(request['machine_id']))
+                    return {'machine': machine.load_machine(), 'profiles': machine.available_profiles(),
+                            'status': machine.cached_status(), 'fleet': records}
+                if action == 'machine_assign':
+                    registration = machine.assign_profile(request['profile_id'])
+                    return {'machine': registration, 'profiles': machine.available_profiles(),
+                            'status': None, 'fleet': machine.fleet()}
+                if action == 'machine_check':
+                    # If boot registration did not complete, the first admin
+                    # refresh can safely finish it. Existing records are
+                    # validated and never replaced with a new identity.
+                    machine.register()
+                    return {'machine': machine.load_machine(), 'profiles': machine.available_profiles(),
+                            'status': machine.check(save=True), 'fleet': machine.fleet()}
+                if action == 'machine_demo_drift':
+                    return machine.demo_drift()
+                return {'machine': machine.load_machine(), 'profiles': machine.available_profiles(),
+                        'status': machine.sync(), 'fleet': machine.fleet()}
+        except (machine.MachineError, OSError) as error:
+            raise RequestError(str(error)) from error
+    if action in {'list_student_submissions', 'get_submission'}:
+        try:
+            return submission_request(request)
+        except ValueError as error:
+            raise RequestError(str(error)) from error
+    if action in {'assignment_status', 'create_assignment', 'update_assignment', 'delete_assignment'}:
+        return assignment_request(request)
+    secure_directory(DATA.parent)
+    secure_directory(STATE.parent)
+    if action in {'create', 'delete_student', 'save', 'disable', 'enable', 'reset_password'}:
+        require_persistent_state()
+    with mutation_lock(), account_snapshot_on_exit(action):
+        data, current = load_data()
+        state = load_state()
+        if action == 'status':
+            names = set(data) | {p.pw_name for p in pwd.getpwall() if USERNAME.fullmatch(p.pw_name)}
+            return {'data': data, 'revision': current,
+                    'persistent_state': persistent_state_available(),
+                    'accounts': {name: account_info(name, state) for name in sorted(names)}}
+        if 'revision' in request and request['revision'] != current:
+            raise RequestError('Student data changed since loading. Refresh before saving or creating.')
+        if action == 'delete_student':
+            return delete_student(request['username'], data, current, state)
+        if action == 'save':
+            validate_data(request['data'])
+            if not set(data) <= set(request['data']):
+                raise RequestError('Saving cannot remove student records.')
+            for name in set(data):
+                if request['data'][name]['tasks'] != data[name]['tasks']:
+                    raise RequestError('Legacy tasks are deprecated and must be preserved unchanged.')
+            for name in set(request['data']) - set(data):
+                student_account(name)
+            new_revision, warning = atomic_json(DATA, request['data'], 0o644, validate_data, current)
+            return {'revision': new_revision, 'message': 'Academic metadata saved.', 'warning': warning}
+        name = request['username']
+        if action == 'create':
+            deleted = load_deleted()
+            reusing_deleted_id = name in deleted['students']
+            if name in data:
+                raise RequestError('Student already exists in academic metadata.')
+            try:
+                pwd.getpwnam(name)
+            except KeyError:
+                pass
+            else:
+                raise RequestError('Linux username already exists.')
+            if name in local_users() or os.path.lexists('/home/' + name):
+                raise RequestError('A local account or home directory already exists.')
+            record = {'roll_number': request['roll_number'], 'display_name': request['display_name'], 'tasks': []}
+            candidate = {**data, name: record}
+            validate_data(candidate)
+            # Check serialized size before creating a Linux account.
+            if len((json.dumps(candidate, ensure_ascii=False, indent=2) + '\n').encode('utf-8')) > MAX_BYTES:
+                raise RequestError('Student data would exceed the 1 MiB limit.')
+            # A deletion marker prevents automatic boot-time resurrection. An
+            # explicit, validated administrator creation is different: clear
+            # the marker durably before creating the replacement identity.
+            # If account creation then fails, metadata is still absent, so the
+            # bootstrap loop cannot recreate this name by itself.
+            if reusing_deleted_id:
+                replacement = {'students': [student for student in deleted['students'] if student != name]}
+                try:
+                    _, deleted_warning = atomic_json(DELETED, replacement, 0o600, validate_deleted)
+                except (RequestError, OSError, ValueError) as error:
+                    raise RequestError('Could not clear the prior deletion marker; no account was created.') from error
+                if deleted_warning:
+                    raise RequestError('The prior deletion marker could not be synchronized; no account was created. Retry after checking the state disk.')
+            try:
+                run_account(['/usr/bin/useradd', '--create-home', '--user-group', '--shell', '/bin/bash',
+                             '--comment', record['roll_number'], '--', name])
+            except (RequestError, OSError):
+                raise RequestError('User creation did not complete; a Linux account or home may already exist. '
+                                   'Inspect them before retrying. Metadata was not changed.')
+            try:
+                run_account(['/usr/bin/chpasswd'], name + ':' + request['password'] + '\n')
+            except (RequestError, OSError, ValueError):
+                raise RequestError('PARTIAL FAILURE: Linux account and home were created, but password setup failed. Metadata was not added. '
+                                   'Refresh and recover the locked Linux account administratively, then save its missing metadata. '
+                                   'The account and home were retained; do not retry Create Student.')
+            # Commit the recoverable Linux identity before exposing its profile.
+            # If this snapshot fails, a later boot must not show a student row
+            # whose account/password cannot be restored.
+            try:
+                persist_accounts()
+            except (RequestError, OSError, ValueError) as error:
+                raise RequestError('PARTIAL FAILURE: Linux account was created, but its persistent recovery record was not saved. '
+                                   'Metadata was not added. Repair the state disk before rebooting.') from error
+            try:
+                new_revision, warning = atomic_json(DATA, candidate, 0o644, validate_data, current)
+            except (RequestError, OSError, ValueError):
+                raise RequestError('PARTIAL FAILURE: Linux account, home and password were created, but metadata saving failed. '
+                                   'Refresh and save the missing metadata for the existing account. '
+                                   'The account and home were retained; do not retry Create Student.')
+            message = f'{name} created.'
+            if reusing_deleted_id:
+                message += ' The prior deletion marker was cleared.'
+            return {'revision': new_revision, 'message': message, 'warning': warning}
+        student_account(name)
+        if action == 'disable':
+            if name not in state:
+                state[name] = shadow_status(name)
+                _, warning = atomic_json(STATE, state, 0o600, validate_state)
+                if warning:
+                    raise RequestError('Recovery state was written but could not be synchronized. Retry Disable Student.')
+            try:
+                run_account(['/usr/bin/usermod', '--lock', '--expiredate', '1', '--', name])
+            except (RequestError, OSError):
+                raise RequestError('Disable did not complete. Recovery state is retained; refresh and retry Disable or Enable.')
+            return {'message': f'{name} disabled. Existing sessions are not terminated.'}
+        if action == 'enable':
+            if name not in state:
+                raise RequestError('Only accounts disabled by this dashboard can be restored automatically.')
+            previous = state[name]
+            expiry = previous['expire']
+            command = ['/usr/bin/usermod', '--expiredate', expiry]
+            command += ['--lock'] if previous['locked'] else ['--unlock']
+            run_account(command + ['--', name])
+            del state[name]
+            try:
+                _, warning = atomic_json(STATE, state, 0o600, validate_state)
+            except (RequestError, OSError):
+                raise RequestError('PARTIAL FAILURE: previous account state restored, but recovery-state cleanup failed. Retry Enable.')
+            return {'message': f'{name}: previous account state restored.', 'warning': warning}
+        # Do not let chpasswd temporarily unlock a disabled password. Expiry
+        # blocks login throughout the change; restore the original state after.
+        prior = shadow_status(name)
+        if name in state or prior['locked']:
+            if name not in state:
+                state[name] = prior
+                atomic_json(STATE, state, 0o600, validate_state)
+            run_account(['/usr/bin/usermod', '--lock', '--expiredate', '1', '--', name])
+            try:
+                run_account(['/usr/bin/chpasswd'], name + ':' + request['password'] + '\n')
+            finally:
+                run_account(['/usr/bin/usermod', '--lock', '--expiredate', '1', '--', name])
+        else:
+            run_account(['/usr/bin/chpasswd'], name + ':' + request['password'] + '\n')
+        return {'message': f'Password reset for {name}.'}
+
+
+def main():
+    try:
+        authorize(sys.argv)
+        raw = sys.stdin.buffer.read(MAX_BYTES + 1)
+        if not raw or len(raw) > MAX_BYTES:
+            raise RequestError('Request is empty or exceeds the 1 MiB limit.')
+        result = dispatch(decode(raw))
+        response = {'ok': True, **result}
+    except RequestError as error:
+        response = {'ok': False, 'error': str(error)}
+    except Exception:
+        # No traceback or request echo: exceptions may contain secret input.
+        response = {'ok': False, 'error': 'Administrative operation failed. Refresh and inspect the current state before retrying.'}
+    sys.stdout.write(json.dumps(response, ensure_ascii=False) + '\n')
+    return 0 if response['ok'] else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

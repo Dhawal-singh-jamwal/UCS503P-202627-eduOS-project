@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=EduOS Student Portal
+Comment=Open the EduOS student portal after login
+Exec=/usr/local/bin/eduos-student-app
+TryExec=/usr/local/bin/eduos-student-app
+Terminal=false
+OnlyShowIn=XFCE;
+X-GNOME-Autostart-enabled=true

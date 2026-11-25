@@ -1,0 +1,3 @@
+# Only this root-owned helper is permitted, with no command-line arguments.
+# Requests (including passwords) arrive on stdin; never record its input/output.
+eduos ALL=(root) NOPASSWD: NOSETENV: NOLOG_INPUT: NOLOG_OUTPUT: /usr/local/bin/eduos-admin-helper ""

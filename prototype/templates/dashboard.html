@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>EduOS - Dashboard</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+
+    <div class="login-container">
+
+        <div class="login-card">
+
+            <h1>EduOS</h1>
+
+            <p class="subtitle">
+                Student Dashboard
+            </p>
+
+            <h2>Welcome, {{ roll_number }}</h2>
+
+            <p>
+                You have successfully logged into
+                the EduOS academic platform.
+            </p>
+
+            <h3>Available Modules</h3>
+
+            <ul>
+                <li>Lab Environment</li>
+                <li>Tasks & Assignments</li>
+                <li>Submission & Evaluation</li>
+            </ul>
+
+            <a href="{{ url_for('logout') }}">
+                <button>Logout</button>
+            </a>
+
+        </div>
+
+    </div>
+
+</body>
+
+</html>
